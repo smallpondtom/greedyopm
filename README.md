@@ -1,0 +1,1 @@
+# Greedy Orthogonal Polynomial Manifold
