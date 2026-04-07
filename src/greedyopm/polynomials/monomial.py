@@ -11,7 +11,7 @@ def evaluate_monomials(S_hat: jnp.ndarray,
     Parameters
     ----------
     S_hat : (r, n)
-    multi_indices : (m, r)   — JAX integer array
+    multi_indices : (m, r) — JAX integer array
 
     Returns
     -------

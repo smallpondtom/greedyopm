@@ -1,7 +1,7 @@
 """
 Greedy Incremental Orthogonal Polynomial Manifold.
 
-Implements the greedy algorithm that *jointly* selects
+Implements the greedy algorithm from Koike & Qian that *jointly* selects
 POD modes and polynomial features for nonlinear dimensionality reduction.
 
 Key features:
@@ -20,7 +20,7 @@ Key features:
 from __future__ import annotations
 
 import functools
-from typing import Dict, Literal, Optional, Tuple
+from typing import Literal, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -78,7 +78,7 @@ def _incremental_qr_new_features(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Orthogonalise new monomial rows against existing orthonormal columns.
 
-    Steps:
+    Steps (Section 4.4 / 6 of the paper):
       1. Project out existing features:  Φ⊥ = Φ_new - Φ_new Q_old Q_old^T
       2. Thin QR:  (1/√n) (Φ⊥)^T = Q_new R_new
       3. P_new = √n Q_new^T   (new orthonormal feature rows)
@@ -96,12 +96,12 @@ def _incremental_qr_new_features(
     Q_new   : (n, m_keep)  new orthonormal columns to append to Q_old
     """
     # Step 1: project out existing features
-    Phi_perp = Phi_new - (Phi_new @ Q_old) @ Q_old.T   # (m_new, n)
+    Phi_perp = Phi_new - (Phi_new @ Q_old) @ Q_old.T      # (m_new, n)
 
     # Step 2: thin QR
-    F = Phi_perp.T / jnp.sqrt(n)                       # (n, m_new)
-    Q_raw, R_raw = jnp.linalg.qr(F, mode="reduced")    # Q: (n, m_new), 
-                                                       # R: (m_new, m_new)
+    F = Phi_perp.T / jnp.sqrt(n)                          # (n, m_new)
+    Q_raw, R_raw = jnp.linalg.qr(F, mode="reduced")       # Q: (n, m_new), 
+                                                          # R: (m_new, m_new)
 
     # Fix sign convention
     signs = jnp.sign(jnp.diag(R_raw))
@@ -110,7 +110,7 @@ def _incremental_qr_new_features(
     R_raw = signs[:, None] * R_raw
 
     # Step 3: orthonormal feature rows
-    P_new = jnp.sqrt(n) * Q_raw.T                      # (m_new, n)
+    P_new = jnp.sqrt(n) * Q_raw.T                         # (m_new, n)
     return P_new, Q_raw
 
 
@@ -144,12 +144,12 @@ def _compute_new_norms_sq(
     return jnp.sum(r_tilde**2, axis=0)  # (m_new,)
 
 
-# ============================================================================
+# =============================================================================
 # Main class
-# ============================================================================
+# =============================================================================
 
 class GreedyOPM:
-    """Greedy Incremental Orthogonal Polynomial Manifold.
+    """Greedy Incremental Orthogonal Polynomial Manifold (Algorithm 1).
 
     Parameters
     ----------
@@ -157,7 +157,7 @@ class GreedyOPM:
         Target reduced dimension (number of modes to select).
     s : int
         Candidate pool size (s > r).  The first s left-singular vectors
-        of the centred snapshot matrix form the candidate set.
+        of the centered snapshot matrix form the candidate set.
     p : int
         Maximum total polynomial degree.
     gamma_sp : float
@@ -165,8 +165,7 @@ class GreedyOPM:
         Features with ‖r_k‖₂ ≤ γ_sp / n are deactivated.
         Set to 0.0 to keep all features active (no sparsity).
     gamma : float
-        Tikhonov regulariation for the final lifting matrix
-        (γ in equation 20 of the paper).
+        Tikhonov regularization for the final lifting matrix.
     family : str
         Classical polynomial family for hybrid basis construction.
     basis : str
@@ -186,7 +185,7 @@ class GreedyOPM:
         *,
         gamma_sp: float = 0.0,
         gamma: float = 1e-8,
-        family: Literal["legendre", "chebyshev", "hermite"] = "legendre",
+        family: Literal["legendre", "chebyshev", "hermite", "monomial"] = "monomial",
         basis: Literal["hybrid", "hierarchical"] = "hybrid",
         ortho_method: Literal["qr", "cholesky"] = "qr",
         center: bool = True,
@@ -202,14 +201,61 @@ class GreedyOPM:
         self.center = center
         self._fitted = False
 
-    # ========================================================================
+    # =================================================================
+    # Feature evaluation helper for the greedy loop
+    # =================================================================
+
+    def _evaluate_greedy_features(
+        self,
+        S_hat_trial: jnp.ndarray,
+        multi_indices: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Evaluate raw polynomial features at trial coordinates.
+
+        This is called inside the greedy loop to evaluate the NEW nonlinear
+        monomials/classical polynomials at the trial reduced coordinates
+        before incremental QR orthogonalization.
+
+        For ``basis="hierarchical"``:  raw monomials  ŝ^α.
+        For ``basis="hybrid"``:  classical tensor-product polynomials
+            (Legendre / Chebyshev / Hermite), rescaled on the fly using
+            the statistics of ``S_hat_trial``.
+
+        The choice of starting basis only affects numerical conditioning
+        of the subsequent incremental QR.  The classical basis produces
+        a Φ that is already approximately orthogonal, so the QR residual
+        after projecting out existing features is smaller and better
+        conditioned.  The final orthonormal features P_new are
+        mathematically identical in exact arithmetic — they span the
+        same subspace — but the classical basis yields smaller round-off
+        errors in finite precision.
+
+        Parameters
+        ----------
+        S_hat_trial : (n_coords, n)  trial reduced coordinates.
+        multi_indices : (m_new, n_coords)  multi-indices for new features.
+
+        Returns
+        -------
+        Phi_new : (m_new, n)  raw feature evaluations.
+        """
+        if self.basis == "hierarchical" or self.family == "monomial":
+            return evaluate_monomials(S_hat_trial, multi_indices)
+
+        # --- hybrid: classical tensor-product polynomials --------------------
+        max_deg = int(jnp.max(multi_indices))
+        return evaluate_classical_tensor(
+            S_hat_trial, multi_indices, self.family, max_deg,
+        )
+
+    # =========================================================================
     # fit
-    # ========================================================================
+    # =========================================================================
 
     def fit(self, S: jnp.ndarray) -> "GreedyOPM":
         """Fit the greedy OPM to snapshot data.
 
-        Implements main algorithm: greedy mode selection with incremental
+        Implements Algorithm 1: greedy mode selection with incremental
         polynomial feature extension and group soft-thresholding.
 
         Parameters
@@ -222,7 +268,7 @@ class GreedyOPM:
         """
         d, n = S.shape
 
-        # ---- Step 1: centre -------------------------------------------------
+        # ---- Step 1: center -------------------------------------------------
         if self.center:
             self.s_ref_ = jnp.mean(S, axis=1, keepdims=True)   # (d, 1)
         else:
@@ -234,9 +280,9 @@ class GreedyOPM:
             S_tilde, full_matrices=False,
         )
         s = min(self.s, len(sigma_full))
-        U_s = U_full[:, :s]            # (d, s)
-        sigma_s = sigma_full[:s]       # (s,)
-        W_s = Wt_full[:s, :].T         # (n, s)
+        U_s = U_full[:, :s]                  # (d, s)
+        sigma_s = sigma_full[:s]             # (s,)
+        W_s = Wt_full[:s, :].T               # (n, s)
 
         # Cache full SVD components needed later
         self.sigma_s_ = sigma_s
@@ -247,7 +293,7 @@ class GreedyOPM:
         # ---- Step 3: greedy mode selection loop -----------------------------
         J = []  # selected mode indices (ordered)
         J_set = set()
-        J_complement = set(range(s))
+        J_complement = set(range(s))  # superscript checkmark J̆ = {1,...,s} \ J
 
         # Initialise Q_old with the degree-0 (constant) feature.
         # Q_old has standard-orthonormal columns: Q_old^T Q_old = I.
@@ -290,6 +336,7 @@ class GreedyOPM:
 
                 # --- (b) old features: rank-1 norm update --------------------
                 # ‖r̃^{(j')}_{i,k}‖² = ‖r̃_{i-1,k}‖² − (σ_{j'}/n · w_{j'}^T p_k)²
+                #! This is not quite correct!!
                 if m_nl > 0:
                     delta_old = (sigma_s[j_prime] / n)**2 * w_P[j_prime]**2
                     old_norms_sq_trial = jnp.maximum(old_norms_sq - delta_old, 0.0)
@@ -298,7 +345,7 @@ class GreedyOPM:
 
                 # --- (c) extend features incrementally -----------------------
                 # (c1) orthogonalise new linear coordinate against Q_old
-                new_coord = SigmaWt[j_prime]  # (n,)
+                new_coord = SigmaWt[j_prime]              # (n,)
                 _, Q_trial_lin = _orthogonalize_new_linear(Q_old, new_coord)
 
                 # (c2) generate new nonlinear multi-indices
@@ -309,11 +356,13 @@ class GreedyOPM:
                 if m_new > 0:
                     # build trial reduced coordinates
                     trial_idx = jnp.array(J + [j_prime], dtype=jnp.int32)
-                    trial_Shat = SigmaWt[trial_idx]  # (n_coords_trial, n)
+                    trial_Shat = SigmaWt[trial_idx]       # (n_coords_trial, n)
 
-                    # evaluate new monomials
+                    # evaluate new features (monomials or classical tensor)
                     new_nl_jax = jnp.array(new_nl_np)
-                    Phi_new = evaluate_monomials(trial_Shat, new_nl_jax)  # (m_new, n)
+                    Phi_new = self._evaluate_greedy_features(
+                        trial_Shat, new_nl_jax,
+                    )  # (m_new, n)
 
                     # orthogonalise against Q_trial_lin (includes all old + new linear)
                     P_new, Q_new_cols = _incremental_qr_new_features(
@@ -342,7 +391,7 @@ class GreedyOPM:
                 # --- (f) polynomial gain with trial basis --------------------
                 poly_gain_trial = float(n * jnp.sum(all_norms_sq * active_mask))
 
-                # --- (g) ΔJ_mode ---------------------------------------------
+                # --- (g) ΔJ_mode (equation 29) -------------------------------
                 delta = linear_gain + poly_gain_trial - current_poly_gain
 
                 if delta > float(best_score):
@@ -357,7 +406,7 @@ class GreedyOPM:
                         "new_norms_sq": new_norms_sq,
                     }
 
-            # ---- Commit best mode -------------------------------------------
+            # ---- Commit best mode (line 12–14 of Algorithm 1) ---------------
             J.append(best_j)
             J_set.add(best_j)
             J_complement.remove(best_j)
@@ -377,7 +426,7 @@ class GreedyOPM:
 
             # Update w_P  (recompute — could be incremental for the new block)
             if m_nl > 0:
-                w_P = W_s.T @ P_nl.T  # (s, m_nl)
+                w_P = W_s.T @ P_nl.T        # (s, m_nl)
             else:
                 w_P = jnp.empty((s, 0))
 
@@ -387,13 +436,13 @@ class GreedyOPM:
         # ---- Step 4: post-selection feature rebuild -------------------------
         # After greedy mode selection, rebuild the full polynomial features
         # for the final r-dimensional coordinates using the standard
-        # orthogonalisation pipeline.  This gives a clean RL_inv_T for
+        # orthogonalization pipeline.  This gives a clean RL_inv_T for
         # out-of-sample evaluation.
         self.J_ = jnp.array(J, dtype=jnp.int32)
-        self.U_r_ = U_s[:, J]                # (d, r)
+        self.U_r_ = U_s[:, J]                               # (d, r)
 
         # Final reduced coordinates
-        self.S_hat_ = self.U_r_.T @ S_tilde  # (r, n)
+        self.S_hat_ = self.U_r_.T @ S_tilde                 # (r, n)
 
         # Build all multi-indices for the final r coordinates
         all_indices_np = graded_lex_multi_indices(self.r, self.p, min_degree=0)
@@ -409,7 +458,7 @@ class GreedyOPM:
         else:
             Phi_final = evaluate_monomials(self.S_hat_, self.multi_indices_)
 
-        # Empirical orthonormalisation
+        # Empirical orthonormalization
         if self.ortho_method == "qr":
             self.Psi_, R = orthogonalize_qr(Phi_final)
             self.RL_inv_T_ = jnp.linalg.inv(R.T)
@@ -429,7 +478,7 @@ class GreedyOPM:
         C_nl = (1.0 / n) * (E_final @ P_nl_final.T)          # (d, m_nl_final)
         self.importances_ = jnp.sum(C_nl**2, axis=0)         # (m_nl_final,)
 
-        # Group soft-thresholding
+        # Group soft-thresholding (Theorem 3.3)
         threshold = self.gamma_sp / n
         norms = jnp.sqrt(self.importances_)
         active_nl_mask = norms > threshold
@@ -441,7 +490,7 @@ class GreedyOPM:
         global_nl_active = self.n_linear_ + active_nl_indices
         self.selected_ = jnp.concatenate([linear_indices, global_nl_active])
 
-        # ---- Step 6: final lifting matrix -----------------------------------
+        # ---- Step 6: final lifting matrix (equation 20) ---------------------
         # For nonlinear features:  V̄ = 1/(n + γ) · E · P_A^T
         P_active = self.Psi_[global_nl_active]                # (m_active, n)
         self.Vbar_nl_ = (1.0 / (n + self.gamma)) * (E_final @ P_active.T)
@@ -454,7 +503,7 @@ class GreedyOPM:
         return self
 
     # =========================================================================
-    # Normalisation helpers
+    # Normalization helpers
     # =========================================================================
 
     def _store_normalization_params(self, S_hat: jnp.ndarray) -> None:
@@ -505,7 +554,7 @@ class GreedyOPM:
 
         Steps:
           1. Evaluate raw polynomial features Φ(ŝ).
-          2. Apply stored orthonormalisation:  Ψ = RL_inv_T · Φ.
+          2. Apply stored orthonormalization:  Ψ = RL_inv_T · Φ.
           3. Select active nonlinear features.
           4. Reconstruct:  s_approx = s_ref + U_r ŝ + V̄_nl · ψ_active.
 
@@ -524,7 +573,7 @@ class GreedyOPM:
         # Raw features at new coordinates
         Phi_new = self._evaluate_raw_features(S_hat)         # (m_total, n_new)
 
-        # Apply stored orthonormalisation
+        # Apply stored orthonormalization
         Psi_new = self.RL_inv_T_ @ Phi_new                   # (m_total, n_new)
 
         # Select active nonlinear features
@@ -544,7 +593,7 @@ class GreedyOPM:
     # =========================================================================
 
     def _evaluate_raw_features(self, S_hat: jnp.ndarray) -> jnp.ndarray:
-        """Evaluate raw (pre-orthonormalisation) polynomial features."""
+        """Evaluate raw (pre-orthonormalization) polynomial features."""
         if self.basis == "hierarchical":
             return evaluate_monomials(S_hat, self.multi_indices_)
         return self._evaluate_classical_with_stored_norm(S_hat)
@@ -575,9 +624,9 @@ class GreedyOPM:
         gathered = uni_vals[dims[None, :], self.multi_indices_]
         return jnp.prod(gathered, axis=1)
 
-    # =================================================================
+    # =========================================================================
     # Error diagnostics
-    # =================================================================
+    # =========================================================================
 
     def reconstruction_error(
         self, S: jnp.ndarray, *, relative: bool = True,

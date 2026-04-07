@@ -2,11 +2,10 @@
 import jax
 import jax.numpy as jnp
 from jax.lax import fori_loop
-# from datageneration import generate_advecting_pulse
-from absl import app
 from absl import flags
 from absl import logging
 from collections import namedtuple
+from functools import lru_cache
 
 jax.config.update('jax_enable_x64', True)
 
@@ -25,14 +24,16 @@ IDX_IN = flags.DEFINE_multi_integer(
 ShiftedSVD = namedtuple('ShiftedSVD', ['U', 'S', 'VT', 'shift'])
 
 
-def default_feature_map(reduced_data_points):
+@jax.jit
+def quadratic_mapping(reduced_data_points):
     r = reduced_data_points.shape[0]
     return jnp.concatenate(
         [reduced_data_points[i] * reduced_data_points[:i + 1] for i in range(r)],
         axis=0)
 
 
-def _make_cubic_mapping_jax_fixed(max_r=15):
+@lru_cache(maxsize=32)
+def _cubic_indices(max_r):
     """
     Factory function to create a cubic mapping that completely avoids boolean indexing.
     """
@@ -55,28 +56,27 @@ def _make_cubic_mapping_jax_fixed(max_r=15):
             if i < r and j < r and k < r:
                 count += 1
         num_valid_for_r[r] = count
-    
-    def cubic_mapping(x):
-        r, n = x.shape
-        
-        if r > max_r:
-            raise ValueError(f"Input dimension {r} exceeds max_r={max_r}")
-        
-        # Pad x to max_r
-        x_padded = jnp.zeros((max_r, n))
-        x_padded = x_padded.at[:r, :].set(x)
-        
-        # Compute all products (including invalid ones)
-        all_products = x_padded[i_indices, :] * x_padded[j_indices, :] * x_padded[k_indices, :]
-        
-        # Return only the first num_valid products (these correspond to valid indices)
-        num_valid = num_valid_for_r[r]
-        return all_products[:num_valid, :]
-    
-    return cubic_mapping
+    return num_valid_for_r, i_indices, j_indices, k_indices
 
-# Cubic mapping function for JAX
-_cubic_mapping_jax = _make_cubic_mapping_jax_fixed(max_r=15)
+
+@jax.jit
+def cubic_mapping(x):
+    r, n = x.shape
+    
+    # Pad x to max_r
+    x_padded = jnp.zeros((r, n))
+    x_padded = x_padded.at[:r, :].set(x)
+
+    num_valid_for_r, i_indices, j_indices, k_indices = _cubic_indices(r)
+    
+    # Compute all products (including invalid ones)
+    all_products = x_padded[i_indices, :] * x_padded[j_indices, :] * x_padded[k_indices, :]
+    
+    # Return only the first num_valid products (these correspond to valid indices)
+    num_valid = num_valid_for_r[r]
+
+    return all_products[:num_valid, :]
+
 
 
 def quadmani_greedy(
@@ -85,7 +85,7 @@ def quadmani_greedy(
     n_vectors_to_check=None,
     reg_magnitude=None,
     idx_in=None,
-    feature_map=default_feature_map,
+    feature_map=quadratic_mapping,
     shifting=True,
 ):
     if r is None:
@@ -123,7 +123,7 @@ def quadmani_greedy_from_svd(
     n_vectors_to_check=None,
     reg_magnitude=None,
     idx_in=None,
-    feature_map=default_feature_map,
+    feature_map=quadratic_mapping,
 ):
     if r is None:
         r = REDUCED_DIMENSION.value
@@ -226,27 +226,7 @@ def lift_quadratic(V,
                    W,
                    shift_value,
                    reduced_data_points,
-                   feature_map=default_feature_map):
+                   feature_map=quadratic_mapping):
     linear_part = V @ reduced_data_points
     quadratic_part = W @ feature_map(reduced_data_points)
     return shift_data(linear_part + quadratic_part, -shift_value)
-
-
-# def main(_):
-#   logging.info('Generating traveling pulse data')
-#   data_points = generate_advecting_pulse()
-#   logging.info('Dividing train and test points')
-#   train_points = data_points[:, ::2]
-#   test_points = data_points[:, 1::2]
-#   logging.info('Computing qudratic manifold')
-#   V, W, shift_value = quadmani_greedy(train_points)
-#   reduced_points = linear_reduce(V, test_points, shift_value)
-#   reconstructed = lift_quadratic(V, W, shift_value, reduced_points)
-#   logging.info('Checking the reconstruction error')
-#   rel_rec_error = jnp.linalg.norm(reconstructed -
-#                                   test_points) / jnp.linalg.norm(test_points)
-#   logging.info('Relative reconstruction error: %.3e', rel_rec_error)
-
-
-# if __name__ == '__main__':
-#   app.run(main)
