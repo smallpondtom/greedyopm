@@ -1,15 +1,20 @@
-from __future__ import annotations 
+"""Empirically normalised univariate probabilist's Hermite polynomials."""
+
+from __future__ import annotations
 
 import functools
+
 import jax
 import jax.numpy as jnp
 from jax import lax
 
+
 @functools.partial(jax.jit, static_argnames=("max_deg",))
 def _hermite_1d(xi: jnp.ndarray, max_deg: int) -> jnp.ndarray:
-    """Normalised probabilist's Hermite polynomials He_0, ..., He_{max_deg}.
+    """Orthonormal probabilist's Hermite polynomials  He_0, ..., He_{max_deg}.
 
-    Normalisation: int He_i He_j exp(-x^2/2)/sqrt(2 pi) dx = delta_{ij}.
+    Normalisation:
+        int He_i He_j exp(-x^2 / 2) / sqrt(2 pi) dx = delta_{ij}.
     """
     xi = jnp.atleast_1d(xi)
     vals = jnp.zeros((max_deg + 1,) + xi.shape, dtype=xi.dtype)
@@ -27,7 +32,7 @@ def _hermite_1d(xi: jnp.ndarray, max_deg: int) -> jnp.ndarray:
 
     vals = lax.fori_loop(1, max_deg, body, vals)
 
-    # Normalise: He_n / sqrt(n!)
+    # He_n -> He_n / sqrt(n!)
     log_factorials = jnp.cumsum(
         jnp.log(jnp.maximum(jnp.arange(max_deg + 1, dtype=xi.dtype), 1.0))
     )

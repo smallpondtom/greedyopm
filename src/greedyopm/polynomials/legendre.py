@@ -1,3 +1,5 @@
+"""Empirically normalised univariate Legendre polynomials on [-1, 1]."""
+
 from __future__ import annotations 
 
 import functools

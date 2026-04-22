@@ -1,18 +1,23 @@
+"""Tensor-product classical polynomial evaluation."""
+
 from __future__ import annotations
 
-import functools 
-import jax 
+import functools
+
+import jax
 import jax.numpy as jnp
 
-from greedyopm.polynomials.legendre import _legendre_1d
-from greedyopm.polynomials.chebyshev import _chebyshev_1d
-from greedyopm.polynomials.hermite import _hermite_1d
+from .chebyshev import _chebyshev_1d
+from .hermite import _hermite_1d
+from .legendre import _legendre_1d
+
 
 _FAMILY_DISPATCH = {
     "legendre": _legendre_1d,
     "chebyshev": _chebyshev_1d,
     "hermite": _hermite_1d,
 }
+
 
 @functools.partial(jax.jit, static_argnames=("family", "max_deg"))
 def evaluate_classical_tensor(
@@ -21,14 +26,20 @@ def evaluate_classical_tensor(
     family: str,
     max_deg: int,
 ) -> jnp.ndarray:
-    """Evaluate tensor-product classical polynomials at each snapshot.
+    """Tensor-product classical polynomials at each snapshot.
+
+    Rescales each coordinate to the classical domain before evaluation:
+    Legendre/Chebyshev use min/max rescaling to ``[-1, 1]`` (Chebyshev
+    additionally contracts by 0.999 to stay away from the boundary); Hermite
+    uses z-score standardisation.  The rescaling params should be cached and
+    reused for out-of-sample evaluation.
 
     Parameters
     ----------
     S_hat : (r, n)
-    multi_indices : (m, r)  — JAX int array
-    family : {"legendre", "chebyshev", "hermite"}
-    max_deg : maximum polynomial degree (static for JIT)
+    multi_indices : (m, r)  int
+    family : "legendre" | "chebyshev" | "hermite"
+    max_deg : int
 
     Returns
     -------
@@ -36,7 +47,7 @@ def evaluate_classical_tensor(
     """
     r, k = S_hat.shape
 
-    # --- Step 1: rescale coordinates to classical domain ---
+    # --- Step 1: rescale coordinates to classical domain ---------------------
     if family == "hermite":
         mu = jnp.mean(S_hat, axis=1, keepdims=True)       # (r, 1)
         sigma = jnp.std(S_hat, axis=1, keepdims=True)     # (r, 1)
@@ -50,7 +61,7 @@ def evaluate_classical_tensor(
         if family == "chebyshev":
             xi = xi * 0.999  # contract away from boundary
 
-    # --- Step 2: precompute univariate polynomial values ---
+    # --- Step 2: precompute univariate polynomial values ---------------------
     # Evaluate all univariate polynomials for each dimension.
     # For each dimension d, evaluate the chosen family at xi[d, :].
     # Result: uni_vals[d, n, j] = phi_n(xi_{d,j})
@@ -61,7 +72,7 @@ def evaluate_classical_tensor(
     uni_vals = jax.vmap(eval_fn, in_axes=(0,), out_axes=0)(xi)
     # uni_vals: (r, max_deg+1, k)
 
-    # --- Step 3: tensor products via advanced indexing ---
+    # --- Step 3: tensor products via advanced indexing -----------------------
     # For multi-index alpha = (a1, ..., ar), the tensor product is
     #   prod_{d=1}^{r} uni_vals[d, alpha_d, :]
     # multi_indices: (m, r)

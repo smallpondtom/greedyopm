@@ -1,28 +1,28 @@
+"""Monomial evaluation:  s_hat^alpha  for all alpha in a multi-index array."""
+
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 
+
 @jax.jit
-def evaluate_monomials(S_hat: jnp.ndarray,
-                       multi_indices: jnp.ndarray) -> jnp.ndarray:
-    """Evaluate monomials  s_hat^alpha  at each snapshot.
+def evaluate_monomials(
+    S_hat: jnp.ndarray,
+    multi_indices: jnp.ndarray,
+) -> jnp.ndarray:
+    """Monomial features at each snapshot.
 
     Parameters
     ----------
     S_hat : (r, n)
-    multi_indices : (m, r) — JAX integer array
+    multi_indices : (m, r)  int
 
     Returns
     -------
-    Phi : (m, n)
+    Phi : (m, n) where  Phi[i, j] = prod_d S_hat[d, j] ** multi_indices[i, d].
     """
-    # S_hat[d, j]^alpha[i, d]  →  prod over d
-    # Use log-space for numerical stability with high degrees
-    # S_hat: (r, n), multi_indices: (m, r)
-    # Broadcast:  S_hat[None, :, :] ** multi_indices[:, :, None]  → (m, r, n)
-    # Then prod over axis 1
+    # Broadcast to (m, r, n) and take product along the r-axis.
     return jnp.prod(
-        S_hat[None, :, :] ** multi_indices[:, :, None],
-        axis=1,
-    )  # (m, n)
+        S_hat[None, :, :] ** multi_indices[:, :, None], axis=1,
+    )
