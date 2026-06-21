@@ -13,8 +13,8 @@ def evaluate_monomials(
 ) -> jnp.ndarray:
     """Monomial features at each snapshot.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     S_hat : (r, n)
     multi_indices : (m, r)  int
 

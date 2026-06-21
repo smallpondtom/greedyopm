@@ -22,10 +22,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from greedyopm.polynomials.classical_tensor import evaluate_classical_tensor
-from greedyopm.polynomials.legendre import _legendre_1d
-from greedyopm.polynomials.chebyshev import _chebyshev_1d
-from greedyopm.polynomials.hermite import _hermite_1d
+from greedyopm.polynomials.classical.classical_tensor import evaluate_classical_tensor
+from greedyopm.polynomials.classical.legendre import _legendre_1d
+from greedyopm.polynomials.classical.chebyshev import _chebyshev_1d
+from greedyopm.polynomials.classical.hermite import _hermite_1d
 
 # ---------------------------------------------------------------------------
 PLOT_DIR = Path(__file__).parent / "plots"

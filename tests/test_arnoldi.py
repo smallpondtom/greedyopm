@@ -18,7 +18,7 @@ from greedyopm.polynomials.multindex import (
     graded_lex_multi_indices, compute_parent_info_for_new,
     new_multi_indices_on_coord_add, graded_lex_multi_indices_for_degrees,
 )
-from greedyopm.polynomials.incremental_arnoldi import (
+from greedyopm.polynomials.__old__.incremental_arnoldi import (
     initial_state,
     incremental_arnoldi_vmap,
     compress_psi_batch,

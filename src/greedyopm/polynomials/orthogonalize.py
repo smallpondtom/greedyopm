@@ -1,9 +1,8 @@
-"""QR/Cholesky-based orthogonalisation of polynomial feature matrices.
+"""QR/Cholesky-based orthogonalization of polynomial feature matrices.
 
-These routines are provided as fallback / comparison paths.  For the greedy
+These routines are provided as fallback / comparison paths. For the greedy
 algorithm, the Arnoldi-based construction in :mod:`arnoldi` and
-:mod:`incremental_arnoldi` is recommended (see the corresponding sections of
-the paper).
+is recommended (see the corresponding sections of the paper).
 
 Given  Phi in R^{M x n},  we want  Psi = factor^{-} Phi  with
 ``(1/n) Psi Psi^T = I_M`` and ``factor`` lower- or upper-triangular.
@@ -18,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .classical_tensor import evaluate_classical_tensor
+from .classical.classical_tensor import evaluate_classical_tensor
 from .monomial import evaluate_monomials
 from .multindex import (
     generate_multi_indices,

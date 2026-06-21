@@ -34,8 +34,8 @@ def evaluate_classical_tensor(
     uses z-score standardisation.  The rescaling params should be cached and
     reused for out-of-sample evaluation.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     S_hat : (r, n)
     multi_indices : (m, r)  int
     family : "legendre" | "chebyshev" | "hermite"

@@ -46,7 +46,7 @@ from data.transport import generate_advecting_pulse
 
 from greedyopm.polynomials.multindex import graded_lex_multi_indices
 from greedyopm.polynomials.monomial import evaluate_monomials
-from greedyopm.polynomials.classical_tensor import evaluate_classical_tensor
+from greedyopm.polynomials.classical.classical_tensor import evaluate_classical_tensor
 from greedyopm.polynomials.orthogonalize import orthogonalize_qr_refined
 from greedyopm.polynomials.arnoldi import arnoldi_build, arnoldi_eval
 

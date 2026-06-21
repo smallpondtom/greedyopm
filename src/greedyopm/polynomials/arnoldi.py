@@ -1,14 +1,14 @@
-"""Multivariate Vandermonde-with-Arnoldi orthogonalisation.
+"""Multivariate Vandermonde-with-Arnoldi (V+A) orthogonalization.
 
 Builds empirically orthonormal polynomial features without ever forming
 the ill-conditioned Vandermonde matrix.  For each alpha != 0 in graded-lex
-order, a "parent pair" (ell, beta) = (last nonzero coordinate, alpha - e_ell)
+order, a "parent pair" (ell, pi) = (last nonzero coordinate, alpha - e_ell)
 is chosen, and the new polynomial is built as
 
-    psi_alpha = (X_ell psi_beta - sum_{gamma < alpha} H_{gamma, alpha} psi_gamma)
+    psi_alpha = (D_ell psi_pi - sum_{gamma < alpha} H_{gamma, alpha} psi_gamma)
                 / H_{alpha, alpha}
 
-where X_ell = diag(s_hat_ell) and the coefficients H_{gamma, alpha} are
+where D_ell = diag(s_hat_ell) and the coefficients H_{gamma, alpha} are
 stored for out-of-sample evaluation via the same recurrence.
 
 The main advantages over QR/Cholesky on the Vandermonde:
@@ -19,8 +19,18 @@ The main advantages over QR/Cholesky on the Vandermonde:
 
 References
 ----------
-Brubeck, Nakatsukasa, Trefethen, "Vandermonde with Arnoldi",
-SIAM Review 63(2):405-415, 2021.
+- Brubeck, Nakatsukasa, Trefethen, "Vandermonde with Arnoldi",
+  SIAM Review 63(2):405-415, 2021.
+- A. P. Austin, M. Krishnamoorthy, S. Leyffer, S. Mrenna, J. Müller, and H.
+  Schulz, “Practical algorithms for multivariate rational approximation,” 
+  Computer Physics Communications, vol. 261, p. 107663, Apr. 2021.
+- J. M. Hokanson, “Multivariate Rational
+  Approximation Using a Stabilized Sanathanan-Koerner Iteration,” Sep. 22, 2020,
+  arXiv: arXiv:2009.10803. doi: 10.48550/arXiv.2009.10803.  
+- W. Zhu and Y.
+  Nakatsukasa, “Convergence and near-optimal sampling for multivariate function
+  approximations in irregular domains via Vandermonde with Arnoldi,” IMA J Numer
+  Anal, p. draf055, Jul. 2025.
 """
 
 from __future__ import annotations
@@ -50,7 +60,7 @@ class ArnoldiBasis(NamedTuple):
     ell_arr : (M,) int32
         Parent coordinate index.  -1 for the degree-0 row.
     parent_arr : (M,) int32
-        Row index of the parent beta(alpha) in ``multi_indices``.  -1 for
+        Row index of the parent pi(alpha) in ``multi_indices``.  -1 for
         the degree-0 row.
     multi_indices : (M, r) int32
         Multi-indices in grlex order (for reference; not used by eval).
@@ -62,8 +72,8 @@ class ArnoldiBasis(NamedTuple):
 
 
 # ---------------------------------------------------------------------------
-# Core build loop (JIT-compiled).  Uses classical Gram-Schmidt with "twice is
-# enough" re-orthogonalisation.  The mask (idx < k) keeps the H column clean
+# Core build loop (JIT-compiled). Uses classical Gram-Schmidt with "twice is
+# enough" re-orthogonalization. The mask (idx < k) keeps the H column clean
 # as Psi is still being built.
 # ---------------------------------------------------------------------------
 
@@ -86,12 +96,13 @@ def _arnoldi_build_jit(
     idx = jnp.arange(M)
     inv_n = 1.0 / n
 
+    # Single execution of the Arnoldi process
     def body(k, state):
         Psi, H = state
         ell = ell_arr[k]
         j = parent_arr[k]
 
-        v = S_hat[ell] * Psi[j]              # X_ell @ psi_beta
+        v = S_hat[ell] * Psi[j]  # X_ell @ psi_pi
         mask = (idx < k).astype(Psi.dtype)
 
         def one_pass(carry, _):
@@ -106,12 +117,13 @@ def _arnoldi_build_jit(
             None, length=n_reorth + 1,
         )
 
-        nrm = jnp.sqrt(jnp.maximum(inv_n * jnp.sum(v * v), 1e-300))
+        nrm = jnp.sqrt(jnp.maximum(inv_n * jnp.sum(v * v), 1e-100))
         Psi = Psi.at[k].set(v / nrm)
         H = H.at[:, k].set(H_col)
         H = H.at[k, k].set(nrm)
         return Psi, H
 
+    # Loop over all parent multi-indices in grlex order
     Psi, H = jax.lax.fori_loop(1, M, body, (Psi, H))
     return Psi, H
 
@@ -156,8 +168,8 @@ def arnoldi_build(
 ) -> Tuple[jnp.ndarray, ArnoldiBasis]:
     """Build orthonormal polynomial features for the given multi-indices.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     S_hat : (r, n)
         Training-time reduced coordinates.
     multi_indices : (M, r)  int
@@ -202,8 +214,8 @@ def arnoldi_build_batch(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Vectorised :func:`arnoldi_build` over a batch of reduced-coordinate tensors.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     S_hat_batch : (B, r, n)
         A batch of ``B`` reduced-coordinate tensors, all with the same
         ``(r, n)`` shape.

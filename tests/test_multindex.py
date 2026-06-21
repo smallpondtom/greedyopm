@@ -1,5 +1,5 @@
 """Sanity checks for multi-index utilities."""
-
+#%%
 import sys
 from pathlib import Path
 import numpy as np
@@ -97,6 +97,7 @@ def test_parent_info_for_new():
     assert np.array_equal(parent_idx, expected), parent_idx
 
 
+# %%
 if __name__ == "__main__":
     test_normalize_degrees()
     test_generate_multi_indices()
@@ -105,3 +106,6 @@ if __name__ == "__main__":
     test_parent_info()
     test_parent_info_for_new()
     print("All multi-index tests passed.")
+
+
+# %%

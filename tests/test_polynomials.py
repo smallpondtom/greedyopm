@@ -21,9 +21,9 @@ import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for CI
 import matplotlib.pyplot as plt
 
-from greedyopm.polynomials.legendre import _legendre_1d
-from greedyopm.polynomials.chebyshev import _chebyshev_1d
-from greedyopm.polynomials.hermite import _hermite_1d
+from greedyopm.polynomials.classical.legendre import _legendre_1d
+from greedyopm.polynomials.classical.chebyshev import _chebyshev_1d
+from greedyopm.polynomials.classical.hermite import _hermite_1d
 
 # ---------------------------------------------------------------------------
 # Output directory for plots

@@ -6,7 +6,7 @@ Layout convention
 -----------------
 Multi-indices are stacked by degree:  degree-0 first (the zero index), then
 degree-1 (the ``r`` standard basis vectors), then each nonlinear degree q >= 2
-in grlex order within the shell.  This is the ordering expected by the
+in grlex order within the shell. This is the ordering expected by the
 Arnoldi / QR / Cholesky orthogonalizers.
 """
 
@@ -125,8 +125,8 @@ def new_multi_indices_on_coord_add(
     The returned array is already in grlex order within each degree shell,
     ordered by ascending degree.  Its LAST coordinate is >= 1 by construction.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     n_coords : int
         Number of coordinates after the addition (>= 1).
     degrees : list of int
@@ -173,8 +173,8 @@ def compute_parent_info(
     Uses the "last non-zero coordinate" rule:  ell(alpha) = max{l : alpha_l >= 1}
     and beta(alpha) = alpha - e_ell.  For the zero index, returns (-1, -1).
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     multi_indices : (M, r) int
 
     Returns
@@ -221,8 +221,8 @@ def compute_parent_info_for_new(
     This function returns the row index of beta in the combined buffer
     [old_rows (M_old rows); new_rows (m_new rows)].
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     old_multi_indices_padded : (M_old, new_coord+1)  int
         The committed multi-indices from iteration i-1, already embedded in
         the (new_coord+1)-dimensional space by appending a zero column.

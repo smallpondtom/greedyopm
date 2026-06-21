@@ -7,17 +7,10 @@ from .arnoldi import (
     arnoldi_eval,
     arnoldi_orthonormality_error,
 )
-from .classical_tensor import evaluate_classical_tensor
+from .classical.classical_tensor import evaluate_classical_tensor
 from .extract_features import (
     extract_features_by_degree,
     extract_poly_features,
-)
-from .incremental_arnoldi import (
-    IncrementalArnoldiState,
-    commit_winner,
-    compress_psi_batch,
-    incremental_arnoldi_vmap,
-    initial_state,
 )
 from .monomial import evaluate_monomials
 from .multindex import (
@@ -41,13 +34,10 @@ from .orthogonalize import (
 
 __all__ = [
     "ArnoldiBasis",
-    "IncrementalArnoldiState",
     "arnoldi_build",
     "arnoldi_eval",
     "arnoldi_orthonormality_error",
     "check_orthonormality",
-    "commit_winner",
-    "compress_psi_batch",
     "compute_parent_info",
     "compute_parent_info_for_new",
     "degree_slices_for_degrees",
@@ -58,8 +48,6 @@ __all__ = [
     "generate_multi_indices",
     "graded_lex_multi_indices",
     "graded_lex_multi_indices_for_degrees",
-    "incremental_arnoldi_vmap",
-    "initial_state",
     "new_multi_indices_on_coord_add",
     "orthogonalize_cholesky",
     "orthogonalize_cholesky_refined",

@@ -2,7 +2,7 @@
 
 Public API
 ----------
-* :class:`GreedyOPM`      -- joint greedy mode + feature selection (Algorithm 1).
+* :class:`GreedyOPM`      -- joint greedy mode + feature selection.
 * :class:`GreedyFixedOPM` -- greedy mode selection with all NL features active.
 
 Polynomial utilities (also re-exported):

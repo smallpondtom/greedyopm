@@ -1,19 +1,14 @@
-"""Greedy Incremental Orthogonal Polynomial Manifold (Algorithm 1 of the paper).
+"""Greedy Incremental Orthogonal Polynomial Manifold.
 
-This module implements the two greedy variants described in the paper:
+This module implements the two greedy variants.
 
 * :class:`GreedyOPM` -- joint greedy selection of POD modes AND polynomial
-  features via group soft-thresholding.  At each iteration, the full
+  features via group soft-thresholding. At each iteration, the full
   multivariate Arnoldi basis is rebuilt from scratch for every candidate
   j', with the rebuild vectorised over candidates via ``vmap``.  This gives
   the "canonical" orthonormal polynomial basis (in grlex order) at every
   step, so the NL subspace is the true orthogonal complement of
-  ``span{1, ŝ_1, ..., ŝ_i}`` within the polynomial space.  The paper's
-  per-iteration incremental Arnoldi (Section 5.5) is available separately
-  in :mod:`greedyopm.polynomials.incremental_arnoldi` for experimentation,
-  but is NOT used here: in practice it produces a tilted NL subspace
-  (new linear rows get orthogonalised against old NL rows), which degrades
-  mode selection on problems with slow Kolmogorov-n-width decay.
+  ``span{1, ŝ_1, ..., ŝ_i}`` within the polynomial space. 
 
 * :class:`GreedyFixedOPM` -- greedy mode selection with all nonlinear
   features kept active (a la Schwerdtner & Peherstorfer 2024) but using
@@ -30,8 +25,8 @@ Memory / compute optimisations
   :func:`arnoldi_build_batch`.
 * Candidate scoring uses the SVD-compressed projections
   ``w_P_nl = W_s^T P_nl^T`` of shape ``(s, m_nl)``, formed with an einsum
-  over the batch.  The ``(d, n)``-wide snapshot / feature matrix is never
-  touched inside the inner loop.
+  over the batch. The ``(d, n)``-wide snapshot / feature matrix is never
+  touched inside the inner loop for efficiency.
 """
 
 from __future__ import annotations
@@ -50,7 +45,7 @@ from .polynomials.arnoldi import (
     arnoldi_build_batch,
     arnoldi_eval,
 )
-from .polynomials.classical_tensor import (
+from .polynomials.classical.classical_tensor import (
     _FAMILY_DISPATCH,
     evaluate_classical_tensor,
 )
@@ -87,15 +82,15 @@ def _validate_ortho_family(
 
 
 # =============================================================================
-# GreedyOPM  --  joint mode + feature selection (Algorithm 1)
+# GreedyOPM  --  joint mode + feature selection 
 # =============================================================================
 
 
 class GreedyOPM:
     """Greedy Incremental Orthogonal Polynomial Manifold.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     r : int
         Target reduced dimension (number of POD modes to select).
     s : int
@@ -177,20 +172,8 @@ class GreedyOPM:
         At each iteration i (0-indexed), we rebuild the full orthonormal
         polynomial basis from scratch for each candidate j' by running the
         multivariate Arnoldi process on the (i+1)-dimensional reduced
-        coordinates (J_{i-1} ∪ {j'}).  This is vectorised across candidates
+        coordinates (J_{i-1} ∪ {j'}). This is vectorised across candidates
         via ``vmap``.
-
-        Rationale: the paper's incremental Arnoldi scheme (Section 5.5)
-        produces a polynomial basis that differs from the "canonical" grlex
-        basis: the new linear row at iteration i is orthogonalised against
-        old NONlinear rows, which tilts the linear subspace away from
-        ``span{1, ŝ_1, ..., ŝ_i}`` and correspondingly tilts the NL
-        subspace.  Empirically this causes the greedy mode selection to
-        degrade significantly for problems with slow Kolmogorov n-width
-        decay (e.g., linear transport).  The full per-iteration rebuild is
-        a factor of 2-3x slower in wall time but produces the "correct"
-        NL subspace at every step, matching :class:`GreedyFixedOPM` quality
-        while also admitting group soft-thresholding.
         """
         d, n = S.shape
         n_f = jnp.asarray(float(n), dtype=S.dtype)
@@ -210,9 +193,9 @@ class GreedyOPM:
         s_eff = min(self.s, int(len(sigma_full)))
         U_s = U_full[:, :s_eff]
         sigma_s = sigma_full[:s_eff]
-        W_s = Wt_full[:s_eff, :].T                                    # (n, s_eff)
+        W_s = Wt_full[:s_eff, :].T                                     # (n, s_eff)
         self.sigma_s_ = sigma_s
-        SigmaWt = sigma_s[:, None] * W_s.T                            # (s_eff, n)
+        SigmaWt = sigma_s[:, None] * W_s.T                             # (s_eff, n)
 
         n_reorth_eff = max(1, int(self.n_reorth))
 
@@ -230,7 +213,7 @@ class GreedyOPM:
             # -- 3a. Build trial S_hat for each candidate -----------------
             # Shape: (n_cand, n_coords_trial, n).  For each candidate c,
             # rows are [SigmaWt[J[0]], ..., SigmaWt[J[i-1]], SigmaWt[cand[c]]].
-            cand_row = SigmaWt[candidates_arr][:, None, :]            # (n_cand, 1, n)
+            cand_row = SigmaWt[candidates_arr][:, None, :]             # (n_cand, 1, n)
             if i == 0:
                 trial_S_hat_all = cand_row
             else:
@@ -253,22 +236,22 @@ class GreedyOPM:
                 trial_S_hat_all, all_mi_np, n_reorth=n_reorth_eff,
             )                                                          # (n_cand, M_i, n)
 
-            # -- 3d. NL block projections in the SVD-reduced space --------
+            # -- 3d. NL block projections onto the unselected modes -------
             nl_start = 1 + n_coords_trial   # grlex: constant + linears then NL
-            P_nl_all = Psi_all[:, nl_start:, :]                       # (n_cand, m_nl, n)
-            # w_P_nl[c, l, k] = W_s[:, l]^T · P_nl_all[c, k, :]
-            w_P_nl_all = jnp.einsum(
-                "nl,cmn->clm", W_s, P_nl_all,
-            )                                                          # (n_cand, s, m_nl)
+            P_nl_all = Psi_all[:, nl_start:, :]                        # (n_cand, m_nl, n)
+            W_cand = W_s[:, candidates_arr]                            # (n, n_cand)
+            # w_P_cand[c, c', k] = W_s[:, cand[c']]^T · P_nl_all[c, k, :]
+            w_P_cand = jnp.einsum(
+                "nl,cmn->clm", W_cand, P_nl_all,
+            )                                                          # (n_cand, n_cand, m_nl)
 
             # -- 3e. Score each candidate ---------------------------------
             sigma_cands = sigma_s[candidates_arr]                      # (n_cand,)
-            # J_c = candidates_py \ {candidates_py[c]}.  For the sum over
-            # J_c, broadcast across the candidate axis and exclude the
-            # self-index.
-            w_P_at_cands = w_P_nl_all[:, candidates_arr, :]            # (n_cand, n_cand, m_nl)
             inv_n = 1.0 / n_f
-            scaled = (inv_n * sigma_cands)[None, :, None] * w_P_at_cands
+            # Column c' of W_cand is mode candidates_arr[c'], matching the
+            # ordering of sigma_cands, so the diagonal (c'==c) is still the
+            # self-mode j' to be excluded from the residual complement.
+            scaled = (inv_n * sigma_cands)[None, :, None] * w_P_cand
             sq = scaled ** 2                                           # (n_cand, n_cand, m_nl)
             total = jnp.sum(sq, axis=1)                                # (n_cand, m_nl)
             diag_ = jnp.diagonal(sq, axis1=0, axis2=1).T               # (n_cand, m_nl)
@@ -277,7 +260,33 @@ class GreedyOPM:
             threshold_sq = (gamma_sp_f * inv_n) ** 2
             active_mask = norms_sq > threshold_sq
             poly_gain = n_f * jnp.sum(norms_sq * active_mask, axis=1)  # (n_cand,)
-            delta = sigma_cands ** 2 + poly_gain                       # absolute scoring
+            delta = sigma_cands ** 2 + poly_gain                       # argmax score
+
+            # # -- 3d. NL block projections in the SVD-reduced space --------
+            # nl_start = 1 + n_coords_trial   # grlex: constant + linears then NL
+            # P_nl_all = Psi_all[:, nl_start:, :]                        # (n_cand, m_nl, n)
+            # # w_P_nl[c, l, k] = W_s[:, l]^T · P_nl_all[c, k, :]
+            # w_P_nl_all = jnp.einsum(
+            #     "nl,cmn->clm", W_s, P_nl_all,
+            # )                                                          # (n_cand, s, m_nl)
+
+            # # -- 3e. Score each candidate ---------------------------------
+            # sigma_cands = sigma_s[candidates_arr]                      # (n_cand,)
+            # # J_c = candidates_py \ {candidates_py[c]}. For the sum over
+            # # J_c, broadcast across the candidate axis and exclude the
+            # # self-index.
+            # w_P_at_cands = w_P_nl_all[:, candidates_arr, :]            # (n_cand, n_cand, m_nl)
+            # inv_n = 1.0 / n_f
+            # scaled = (inv_n * sigma_cands)[None, :, None] * w_P_at_cands
+            # sq = scaled ** 2                                           # (n_cand, n_cand, m_nl)
+            # total = jnp.sum(sq, axis=1)                                # (n_cand, m_nl)
+            # diag_ = jnp.diagonal(sq, axis1=0, axis2=1).T               # (n_cand, m_nl)
+            # norms_sq = total - diag_                                   # per-cand, per-feature
+
+            # threshold_sq = (gamma_sp_f * inv_n) ** 2
+            # active_mask = norms_sq > threshold_sq                      # ‖r̃‖ > γ_sp/n
+            # poly_gain = n_f * jnp.sum(norms_sq * active_mask, axis=1)  # (n_cand,)
+            # delta = sigma_cands ** 2 + poly_gain                       # absolute scoring
 
             # -- 3f. Pick winner ------------------------------------------
             best_local = int(jnp.argmax(delta))
@@ -342,11 +351,11 @@ class GreedyOPM:
 
         # --- 5. Global active set and final lifting matrix ----------------
         E_final = S_tilde - self.U_r_ @ self.S_hat_                    # (d, n)
-        P_nl_final = self.Psi_[self.n_linear_:]                         # (m_nl, n)
+        P_nl_final = self.Psi_[self.n_linear_:]                        # (m_nl, n)
         self.m_nl_ = int(P_nl_final.shape[0])
 
-        C_nl = (1.0 / n) * (E_final @ P_nl_final.T)                     # (d, m_nl)
-        self.importances_ = jnp.sum(C_nl ** 2, axis=0)                  # (m_nl,)
+        C_nl = (1.0 / n) * (E_final @ P_nl_final.T)                    # (d, m_nl)
+        self.importances_ = jnp.sum(C_nl ** 2, axis=0)                 # (m_nl,)
 
         threshold = self.gamma_sp / n
         norms = jnp.sqrt(self.importances_)
@@ -355,7 +364,7 @@ class GreedyOPM:
         global_nl_active = self.n_linear_ + active_nl_local
         self.active_nl_global_ = global_nl_active
 
-        P_active = self.Psi_[global_nl_active]                          # (|A|, n)
+        P_active = self.Psi_[global_nl_active]                         # (|A|, n)
         self.Vbar_nl_ = (1.0 / (n + self.gamma)) * (E_final @ P_active.T)
 
         linear_indices = jnp.arange(self.n_linear_)
@@ -592,9 +601,9 @@ def _ortho_error_from_features(
     gamma: float,
     n: int,
 ) -> jnp.ndarray:
-    """Manifold reconstruction error  ||E - Vbar P||_F^2  in the reduced space."""
+    """Manifold reconstruction error  ||E - Vbar P||_F^2  in the REDUCED space."""
     linear_residual = jnp.sum(sigma_out ** 2)
-    BP = sigma_out[:, None] * Wt_out_Pt                  # (s - i, m_nl)
+    BP = sigma_out[:, None] * Wt_out_Pt  # (s - i, m_nl)
     nl_correction = jnp.sum(BP ** 2) / (n + gamma)
     return linear_residual - nl_correction
 
@@ -606,8 +615,8 @@ class GreedyFixedOPM:
     polynomial features.  No sparsification: all nonlinear features are used
     in the lifting matrix.
 
-    Parameters
-    ----------
+    Arguments
+    ---------
     r, s, p : as in :class:`GreedyOPM`.
     gamma : float
         Tikhonov regularisation for the lifting matrix.
@@ -757,8 +766,17 @@ class GreedyFixedOPM:
 
         for i in range(self.r):
             n_coords = i + 1
+
+            # Total number of polynomial DoFs = 1 + r + (poly features)
             p_eff = self._effective_degrees(n_coords, n, self.degrees_)
+
             if not p_eff:
+                warnings.warn(
+                    f"No polynomial features available for {n_coords} coords "
+                    f"and {n} snapshots. Consider reducing the requested "
+                    f"degrees {self.degrees_}.",
+                    stacklevel=2,
+                )
                 all_mi_np = graded_lex_multi_indices_for_degrees(
                     n_coords, [],
                 )
@@ -792,28 +810,51 @@ class GreedyFixedOPM:
 
                 Psi_all, _, _, _ = arnoldi_build_batch(
                     trial_S_hat_all, all_mi_np, n_reorth=n_reorth_eff,
-                )                                                          # (n_cand, M, n)
-                P_nl_all = Psi_all[:, nl_start:, :]                        # (n_cand, m_nl, n)
+                )                                                   # (n_cand, M, n)
+                P_nl_all = Psi_all[:, nl_start:, :]                 # (n_cand, m_nl, n)
 
                 # For each candidate c, trial = J ∪ {cand[c]},
                 # out(c) = complement \ {cand[c]} = all other candidates.
-                # Maximise:  sigma_{cand[c]}^2 + (1/(n+gamma)) * A(c),
+                # Maximize:  sigma_{cand[c]}^2 + (1/(n+gamma)) * A(c),
                 # where A(c) = sum_{c' != c, k} (SigmaWt[cands[c']] · P_nl[c, k])^2.
-                w_P_nl_all = jnp.einsum(
-                    "nl,cmn->clm", W_s, P_nl_all,
-                )                                                          # (n_cand, s, m_nl)
-                w_P_at_cands = w_P_nl_all[:, candidates_arr, :]            # (n_cand, n_cand, m_nl)
+                W_cand = W_s[:, candidates_arr]                    # (n, n_cand)
+                w_P_cand = jnp.einsum(
+                    "nl,cmn->clm", W_cand, P_nl_all,
+                )                                                  # (n_cand, n_cand, m_nl)
                 sigma_cands = sigma_s[candidates_arr]
-                scaled = sigma_cands[None, :, None] * w_P_at_cands          # (n_cand, n_cand, m_nl)
+                # Column c' of W_cand is mode candidates_arr[c'], matching the
+                # ordering of sigma_cands, so the diagonal (c'==c) is the
+                # self-mode to exclude from the complement.
+                scaled = sigma_cands[None, :, None] * w_P_cand     # (n_cand, n_cand, m_nl)
                 sq = scaled ** 2
-                total = jnp.sum(sq, axis=(1, 2))                           # (n_cand,)
+                total = jnp.sum(sq, axis=(1, 2))                   # (n_cand,)
                 diag_ = jnp.sum(
                     jnp.diagonal(sq, axis1=0, axis2=1), axis=0,
-                )                                                          # (n_cand,)
+                )                                                  # (n_cand,)
                 A_c = total - diag_
                 score = sigma_cands ** 2 + A_c / (n_f + gamma_f)
                 best_local = int(jnp.argmax(score))
                 best_j = candidates[best_local]
+
+                # # For each candidate c, trial = J ∪ {cand[c]},
+                # # out(c) = complement \ {cand[c]} = all other candidates.
+                # # Maximize:  sigma_{cand[c]}^2 + (1/(n+gamma)) * A(c),
+                # # where A(c) = sum_{c' != c, k} (SigmaWt[cands[c']] · P_nl[c, k])^2.
+                # w_P_nl_all = jnp.einsum(
+                #     "nl,cmn->clm", W_s, P_nl_all,
+                # )                                                   # (n_cand, s, m_nl)
+                # w_P_at_cands = w_P_nl_all[:, candidates_arr, :]     # (n_cand, n_cand, m_nl)
+                # sigma_cands = sigma_s[candidates_arr]
+                # scaled = sigma_cands[None, :, None] * w_P_at_cands  # (n_cand, n_cand, m_nl)
+                # sq = scaled ** 2
+                # total = jnp.sum(sq, axis=(1, 2))                    # (n_cand,)
+                # diag_ = jnp.sum(
+                #     jnp.diagonal(sq, axis1=0, axis2=1), axis=0,
+                # )                                                   # (n_cand,)
+                # A_c = total - diag_
+                # score = sigma_cands ** 2 + A_c / (n_f + gamma_f)
+                # best_local = int(jnp.argmax(score))
+                # best_j = candidates[best_local]
             else:
                 # --- QR / Cholesky path: per-candidate Python loop --------
                 best_j = candidates[0]
