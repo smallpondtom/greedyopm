@@ -26,6 +26,7 @@ sys.path.insert(0, str(_HERE.parent))             # experiments/
 sys.path.insert(0, str(_HERE.parent / "data"))    # shallow_water solver
 from exp_methods import run_sweep, build_model, METHOD_NAMES   # noqa: E402
 from exp_plots import (error_vs_r, field_panels,               # noqa: E402
+                       field_panels_horizontal,
                        active_features_table, active_features_bar)
 from shallow_water import generate_shallow_water               # noqa: E402
 
@@ -110,13 +111,22 @@ def main(phase="all"):
                     / np.linalg.norm(np.asarray(Smat[:, col[split]])))
         for split, tag in [("train", "Training"), ("test", "Test")]:
             tcol = tspan[::2][col["train"]] if split == "train" else tspan[1::2][col["test"]]
+            title = (f"Shallow water height $h(x,y)$ — {tag} snapshot "
+                     f"(t={tcol:.2f}, r={R_FIELD})")
+            # vertical (per-method) panel: narrower figure -> square cells, less
+            # horizontal whitespace for the equal-aspect height field.
             field_panels(
                 truth[split], recon[split], METHOD_NAMES,
-                str(PLOTS / f"swe_field_{split}"),
-                f"Shallow water height $h(x,y)$ — {tag} snapshot "
-                f"(t={tcol:.2f}, r={R_FIELD})",
+                str(PLOTS / f"swe_field_{split}"), title,
                 cmap="viridis", extent=ext, xlabel="$x$", ylabel="$y$",
-                aspect="equal", rel_errs=rel[split])
+                aspect="equal", rel_errs=rel[split],
+                figsize=(6.5, 3.0 * (len(METHOD_NAMES) + 1)))
+            # horizontal panel: tightly packed columns (one per method)
+            field_panels_horizontal(
+                truth[split], recon[split], METHOD_NAMES,
+                str(PLOTS / f"swe_field_{split}_horizontal"), title,
+                cmap="viridis", extent=ext, xlabel="$x$", ylabel="$y$",
+                aspect="equal", rel_errs=rel[split], axes_pad=(0.05, 0.30))
     print("DONE")
 
 

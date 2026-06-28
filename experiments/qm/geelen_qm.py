@@ -16,6 +16,17 @@ selected columns by Tikhonov-regularized least squares to remove shrinkage bias
 
 The quadratic feature map is imported from ``qm.quadmani`` so the features match
 Greedy-QM exactly.
+
+References:
+[1] R. Geelen, S. Wright, and K. Willcox, “Operator inference for non-intrusive
+model reduction with quadratic manifolds,” Computer Methods in Applied Mechanics
+and Engineering, vol. 403, p. 115717, Jan. 2023, doi: 10.1016/j.cma.2022.115717.
+[2] Wright, S. J., Nowak, R. D., & Figueiredo, M. A. (2009). Sparse
+reconstruction by separable approximation. IEEE Transactions on signal
+processing, 57(7), 2479-2493.
+[3] Beck, A., & Teboulle, M. (2009). A fast iterative shrinkage-thresholding
+algorithm for linear inverse problems. SIAM journal on imaging sciences, 2(1),
+183-202.
 """
 
 from __future__ import annotations
@@ -41,7 +52,7 @@ def _fista_group_lasso(G, EPt, lam, L, n_iter):
     thr = lam / L
 
     def prox(Z):
-        col = jnp.linalg.norm(Z, axis=0)                  # (q,)
+        col = jnp.linalg.norm(Z, axis=0) # (q,)
         scale = jnp.maximum(0.0, 1.0 - thr / jnp.maximum(col, 1e-300))
         return Z * scale[None, :]
 

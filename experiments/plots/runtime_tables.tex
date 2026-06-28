@@ -1,0 +1,75 @@
+\begin{table}[t]
+\centering
+\caption{Mean fit runtime [s] over $r=1,\dots,r_{\max}$.}
+\label{tab:runtime-summary}
+\small
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Method} & Linear transport & Shallow water (2D) & Navier--Stokes (K\'arm\'an, Re=30) \\
+\midrule
+POD & 0.19 & 0.78 & 0.16 \\
+Greedy-QM & 1.88 & 3.20 & 2.59 \\
+Geelen-QM & 0.61 & 1.26 & 0.60 \\
+Greedy-Fixed-OPM (p=2) & 0.86 & 1.54 & 0.88 \\
+Greedy-OPM (p=2) & 1.01 & 2.26 & 1.11 \\
+Greedy-OPM (p=[2,3]) & 2.34 & 4.02 & 3.41 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Fit runtime [s] vs reduced dimension $r$ --- Linear transport.}
+\label{tab:runtime-transport}
+\small
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+\textbf{Method} & $r=1$ & $r=2$ & $r=3$ & $r=4$ & $r=5$ & $r=6$ & $r=7$ & $r=8$ & $r=9$ & $r=10$ \\
+\midrule
+POD & 0.47 & 0.17 & 0.13 & 0.14 & 0.14 & 0.14 & 0.16 & 0.15 & 0.22 & 0.15 \\
+Greedy-QM & 1.15 & 0.86 & 0.91 & 1.02 & 1.20 & 1.41 & 1.82 & 2.47 & 3.44 & 4.52 \\
+Geelen-QM & 0.45 & 0.51 & 0.46 & 0.49 & 0.51 & 0.69 & 0.65 & 0.72 & 0.77 & 0.82 \\
+Greedy-Fixed-OPM (p=2) & 0.72 & 0.73 & 0.72 & 0.75 & 0.76 & 0.85 & 0.87 & 0.96 & 1.06 & 1.15 \\
+Greedy-OPM (p=2) & 0.74 & 0.66 & 0.70 & 0.76 & 0.80 & 0.97 & 1.06 & 1.22 & 1.68 & 1.53 \\
+Greedy-OPM (p=[2,3]) & 0.94 & 1.00 & 1.13 & 1.25 & 1.67 & 1.90 & 2.17 & 2.91 & 4.33 & 6.13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Fit runtime [s] vs reduced dimension $r$ --- Shallow water (2D).}
+\label{tab:runtime-swe}
+\small
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+\textbf{Method} & $r=1$ & $r=2$ & $r=3$ & $r=4$ & $r=5$ & $r=6$ & $r=7$ & $r=8$ & $r=9$ & $r=10$ \\
+\midrule
+POD & 0.93 & 0.65 & 0.74 & 0.70 & 0.74 & 0.78 & 0.73 & 0.76 & 0.83 & 0.91 \\
+Greedy-QM & 2.08 & 1.87 & 1.91 & 2.06 & 2.39 & 2.80 & 3.31 & 4.05 & 5.10 & 6.41 \\
+Geelen-QM & 0.93 & 1.00 & 1.13 & 1.10 & 1.31 & 1.40 & 1.19 & 1.53 & 1.51 & 1.52 \\
+Greedy-Fixed-OPM (p=2) & 1.42 & 1.28 & 1.37 & 1.40 & 1.47 & 1.54 & 1.62 & 1.68 & 1.78 & 1.88 \\
+Greedy-OPM (p=2) & 1.63 & 1.71 & 1.76 & 2.05 & 2.15 & 2.28 & 2.43 & 2.49 & 3.07 & 3.04 \\
+Greedy-OPM (p=[2,3]) & 2.01 & 2.09 & 2.30 & 2.46 & 3.07 & 3.47 & 3.77 & 4.83 & 6.72 & 9.47 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Fit runtime [s] vs reduced dimension $r$ --- Navier--Stokes (K\'arm\'an, Re=30).}
+\label{tab:runtime-nse}
+\small
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+\textbf{Method} & $r=1$ & $r=2$ & $r=3$ & $r=4$ & $r=5$ & $r=6$ & $r=7$ & $r=8$ & $r=9$ & $r=10$ \\
+\midrule
+POD & 0.31 & 0.12 & 0.13 & 0.13 & 0.14 & 0.16 & 0.15 & 0.19 & 0.15 & 0.15 \\
+Greedy-QM & 1.02 & 0.80 & 0.90 & 1.07 & 1.42 & 1.87 & 2.64 & 3.76 & 5.22 & 7.18 \\
+Geelen-QM & 0.44 & 0.43 & 0.44 & 0.61 & 0.59 & 0.64 & 0.67 & 0.72 & 0.67 & 0.77 \\
+Greedy-Fixed-OPM (p=2) & 0.69 & 0.66 & 0.70 & 0.77 & 0.79 & 0.87 & 0.90 & 1.00 & 1.13 & 1.28 \\
+Greedy-OPM (p=2) & 0.55 & 0.66 & 0.61 & 0.81 & 0.90 & 1.08 & 1.21 & 1.37 & 1.60 & 2.27 \\
+Greedy-OPM (p=[2,3]) & 0.83 & 0.96 & 1.05 & 1.28 & 1.52 & 2.24 & 3.00 & 4.53 & 7.10 & 11.60 \\
+\bottomrule
+\end{tabular}
+\end{table}

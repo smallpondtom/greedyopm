@@ -102,8 +102,13 @@ def quadmani_greedy(
         shift_value = jnp.zeros(data_points.shape[0])
 
     ### !!! CHANGE TO DEFAULT CPU !!! ###
+    # full_matrices=False: only the first min(d, n) left singular vectors are
+    # ever indexed below (idx_in/idx_out range over arange(len(sigma))), so the
+    # economy SVD is exactly equivalent and avoids forming the full d x d factor
+    # (a ~14 GB, ~50 s waste for the d=41682 NSE state).
     with jax.default_device(jax.devices('cpu')[0]):
-        phi, sigma, psit = jnp.linalg.svd(shift_data(data_points, shift_value))
+        phi, sigma, psit = jnp.linalg.svd(
+            shift_data(data_points, shift_value), full_matrices=False)
     ### !!! END OF CHANGE !!! ###
     
     shifted_svd = ShiftedSVD(phi, sigma, psit, shift_value)

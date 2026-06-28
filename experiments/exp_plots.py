@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import ImageGrid
 
 from exp_methods import METHOD_STYLES
 
@@ -109,10 +110,15 @@ def active_features_bar(results, rs, methods, out_prefix, suptitle):
 
 def field_panels(truth_img, recon_imgs, names, out_prefix, suptitle,
                  cmap="viridis", extent=None, xlabel="", ylabel="",
-                 aspect="auto", rel_errs=None, formats=("png",)):
-    """Grid: row 0 = ground truth; each following row = (recon, |error|)."""
+                 aspect="auto", rel_errs=None, formats=("png",), figsize=None):
+    """Grid: row 0 = ground truth; each following row = (recon, |error|).
+
+    ``figsize`` overrides the default (useful to shrink horizontal whitespace
+    for square, equal-aspect fields -- pass a narrower width).
+    """
     n = len(names)
-    fig, axes = plt.subplots(n + 1, 2, figsize=(11, 3.0 * (n + 1)))
+    fig, axes = plt.subplots(n + 1, 2,
+                             figsize=figsize or (11, 3.0 * (n + 1)))
     vmin, vmax = float(np.min(truth_img)), float(np.max(truth_img))
     errs = {nm: np.abs(recon_imgs[nm] - truth_img) for nm in names}
     emax = max(float(np.max(errs[nm])) for nm in names) or 1.0
@@ -141,6 +147,58 @@ def field_panels(truth_img, recon_imgs, names, out_prefix, suptitle,
             a1.set_xlabel(xlabel, fontsize=12)
     fig.suptitle(suptitle, fontsize=18, y=1.005)
     plt.tight_layout()
+    for ext in formats:
+        fig.savefig(f"{out_prefix}.{ext}", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    saved {out_prefix} [{','.join(formats)}]")
+
+
+def field_panels_horizontal(truth_img, recon_imgs, names, out_prefix, suptitle,
+                            cmap="viridis", extent=None, xlabel="", ylabel="",
+                            aspect="auto", rel_errs=None, formats=("png",),
+                            cell=2.6, axes_pad=(0.08, 0.30)):
+    """Horizontal grid: one column per method, row 0 = reconstruction, row 1 =
+    |error|.
+
+    A single shared colorbar per row (recon colormap / error colormap) sits at
+    the right edge, and the panels are packed with ``ImageGrid`` so square,
+    equal-aspect fields stay tight (use a small ``axes_pad`` to remove the white
+    gutters between plots).  ``aspect="equal"`` preserves the data aspect ratio
+    (square fields); ``aspect="auto"`` lets each image fill its cell (space-time).
+    """
+    n = len(names)
+    vmin, vmax = float(np.min(truth_img)), float(np.max(truth_img))
+    errs = {nm: np.abs(recon_imgs[nm] - truth_img) for nm in names}
+    emax = max(float(np.max(errs[nm])) for nm in names) or 1.0
+    im_kw = dict(extent=extent, origin="lower")
+
+    fig = plt.figure(figsize=(cell * n + 1.4, cell * 2 + 1.3))
+    grid = ImageGrid(fig, 111, nrows_ncols=(2, n), axes_pad=axes_pad,
+                     aspect=(aspect == "equal"), share_all=True,
+                     cbar_mode="edge", cbar_location="right",
+                     cbar_size="6%", cbar_pad=0.10)
+
+    im_recon = im_err = None
+    for j, nm in enumerate(names):
+        a0, a1 = grid[j], grid[n + j]                 # row 0, row 1
+        im_recon = a0.imshow(recon_imgs[nm], cmap=cmap, vmin=vmin, vmax=vmax,
+                             aspect=aspect, **im_kw)
+        tag = nm + (f"\n(rel.err {rel_errs[nm]:.2e})" if rel_errs else "")
+        a0.set_title(tag, fontsize=10)
+        im_err = a1.imshow(errs[nm], cmap="RdBu_r", vmin=0, vmax=emax,
+                           aspect=aspect, **im_kw)
+        a1.set_xlabel(xlabel, fontsize=10)
+        a0.tick_params(labelsize=8)
+        a1.tick_params(labelsize=8)
+        if j == 0:
+            a0.set_ylabel(f"Reconstruction\n{ylabel}", fontsize=11)
+            a1.set_ylabel(f"Absolute error\n{ylabel}", fontsize=11)
+
+    cb0 = grid.cbar_axes[0].colorbar(im_recon)        # row 0: field colormap
+    cb1 = grid.cbar_axes[1].colorbar(im_err)          # row 1: error colormap
+    cb0.ax.tick_params(labelsize=8)
+    cb1.ax.tick_params(labelsize=8)
+    fig.suptitle(suptitle, fontsize=16)
     for ext in formats:
         fig.savefig(f"{out_prefix}.{ext}", dpi=160, bbox_inches="tight")
     plt.close(fig)

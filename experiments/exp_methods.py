@@ -179,10 +179,12 @@ def run_sweep(S_train, S_test, rs, cfg, ckpt_path, time_budget=38.0,
                 return results, False
             tic = time.time()
             model = build_model(name, S_train, r, cfg)
+            fit_secs = round(time.time() - tic, 3)     # fit-only wall time
             etr = model.reconstruction_error(S_train, relative=True)
             ete = model.reconstruction_error(S_test, relative=True)
             results[key] = dict(method=name, r=int(r), train=etr, test=ete,
                                 n_active=_n_active(model),
+                                fit_secs=fit_secs,
                                 secs=round(time.time() - tic, 2))
             done_any = True
             print(f"  r={r:2d}  {name:24s} train={etr:.3e} test={ete:.3e} "

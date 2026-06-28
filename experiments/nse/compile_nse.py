@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 import scipy.sparse as sps
 
-SRC = Path("/sessions/loving-gallant-allen/mnt/transient_ns_pbenner")
-JSON = SRC / "simulation_nse" / "sc_30_0-12_2000.json"
-OUT = SRC / "nse_snapshots.npz"          # one compiled file
+DATA_DIR = Path(__file__).resolve().parent / "data" 
+JSON = DATA_DIR / "sc_30_0-12_2000.json"
+OUT = DATA_DIR / "nse_snapshots.npz"  # one compiled file
 
 
 def main():
@@ -46,7 +46,7 @@ def main():
 
     V = np.empty((dloc, n), dtype=np.float32)
     for j, ct in enumerate(times):
-        a = np.load(str(SRC / "simulation_nse" / (vstr[ct] + ".npy")))
+        a = np.load(str(DATA_DIR / "snapshots" / (vstr[ct] + ".npy")))
         V[:, j] = a[invinds, 0].astype(np.float32)
         if j % 400 == 0:
             print(f"  loaded {j}/{n}  ({time.time()-t0:.1f}s)")

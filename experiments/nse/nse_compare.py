@@ -26,19 +26,29 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent))             # experiments/
+sys.path.insert(0, str(_HERE.parent))                              # experiments/
+DATA_DIR = _HERE / "data"
 from exp_methods import build_model, METHOD_NAMES, METHOD_STYLES   # noqa: E402
-from exp_plots import error_vs_r                                   # noqa: E402
+from exp_plots import (error_vs_r,                                 # noqa: E402
+                       active_features_table, active_features_bar)
 
-DATA = _HERE / "nse_compressed.npz"
+DATA = DATA_DIR / "nse_compressed.npz"
 PLOTS = _HERE / "plots"
 CKPT = PLOTS / "nse_compare_results.json"
 
 R_MAX = 10
-R_OUT = 10                       # r used for the y(t) timeseries (matches runme rv=10)
+R_OUT = 10               # r used for the y(t) timeseries (matches runme rv=10)
 RS = list(range(1, R_MAX + 1))
-CFG = dict(s_pool=25, gamma_qm=1e-12, gamma_opm=1e-12,
-           gamma_geelen=1e-8, geelen_rel=0.10, geelen_iters=400, tau=1e-6)
+CFG = dict(
+    s_pool=100, 
+    gamma_qm=1e-12, 
+    gamma_opm=1e-12,
+    gamma_geelen=1e-8, 
+    geelen_rel=0.10, 
+    geelen_iters=400, 
+    tau=1e-3
+)
+TIME_BUDGET = 300
 
 
 def load():
@@ -50,7 +60,7 @@ def _metrics(model, A, Y, floor, nrm, C_red, y_ref):
     A = jnp.asarray(A)
     Ah = np.asarray(model.reconstruct(A))
     state_abs = float(np.linalg.norm(np.asarray(A) - Ah))
-    state_rel = float(np.sqrt(state_abs**2 + floor**2) / nrm)   # full-state error
+    state_rel = float(np.sqrt(state_abs**2 + floor**2) / nrm)  # full-state error
     y = y_ref[:, None] + C_red @ Ah
     out_rel = float(np.linalg.norm(Y - y) / np.linalg.norm(Y))
     return state_rel, out_rel
@@ -80,10 +90,12 @@ def run_sweep(D, budget=33.0):
                 _save(res); print("[budget] pausing; rerun to continue"); return res, False
             tic = time.time()
             model = build_model(nm, jnp.asarray(A_tr), r, CFG)
+            fit_secs = round(time.time() - tic, 3)     # fit-only wall time
             s_tr, o_tr = _metrics(model, A_tr, Y_tr, ftr, ntr, C_red, y_ref)
             s_te, o_te = _metrics(model, A_te, Y_te, fte, nte, C_red, y_ref)
             res[key] = dict(method=nm, r=int(r), state_train=s_tr, state_test=s_te,
                             out_train=o_tr, out_test=o_te, n_active=_n_active(model),
+                            fit_secs=fit_secs,
                             secs=round(time.time() - tic, 2))
             did = True
             print(f"  r={r:2d} {nm:24s} state(te)={s_te:.3e} out(te)={o_te:.3e} "
@@ -150,7 +162,7 @@ def main(phase="all"):
     print(f"[nse] K={int(D['K'])} train {D['A_train'].shape} test {D['A_test'].shape}"
           f"  n_outputs={D['Y_train'].shape[0]}  phase={phase}")
     if phase in ("all", "sweep"):
-        res, done = run_sweep(D)
+        res, done = run_sweep(D, budget=TIME_BUDGET)
         if not done:
             return
         if phase == "sweep":
@@ -166,6 +178,12 @@ def main(phase="all"):
                    "Karman vortex — full-state reconstruction error vs reduced dimension")
         error_vs_r(res_out, RS, METHOD_NAMES, str(PLOTS / "nse_output_error_vs_r"),
                    "Karman vortex — sensor-output error $\\|y-\\hat y\\|/\\|y\\|$ vs reduced dimension")
+    if phase in ("all", "active"):
+        print("\n[nse] number of active nonlinear features:")
+        active_features_table(res, RS, METHOD_NAMES)
+        active_features_bar(res, RS, METHOD_NAMES,
+                            str(PLOTS / "nse_active_features"),
+                            "Karman vortex — active nonlinear features vs reduced dimension")
     if phase in ("all", "timeseries"):
         timeseries(D)
     print("DONE")

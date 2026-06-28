@@ -24,6 +24,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))                          # experiments/
 from exp_methods import run_sweep, build_model, METHOD_NAMES   # noqa: E402
 from exp_plots import (error_vs_r, field_panels,               # noqa: E402
+                       field_panels_horizontal,
                        active_features_table, active_features_bar)
 
 PLOTS = _HERE / "plots"
@@ -104,10 +105,15 @@ def main(phase="all"):
                                                             relative=True)
         for split, Smat, tag in [("train", S_train, "Training"),
                                  ("test", S_test, "Test")]:
+            title = f"Advecting pulse — space-time reconstruction ({tag}, r={R_FIELD})"
             field_panels(
                 np.asarray(Smat), recon[split], METHOD_NAMES,
-                str(PLOTS / f"transport_field_{split}"),
-                f"Advecting pulse — space-time reconstruction ({tag}, r={R_FIELD})",
+                str(PLOTS / f"transport_field_{split}"), title,
+                cmap="viridis", extent=ext[split], xlabel="time $t$",
+                ylabel="space $x$", aspect="auto", rel_errs=rel[split])
+            field_panels_horizontal(
+                np.asarray(Smat), recon[split], METHOD_NAMES,
+                str(PLOTS / f"transport_field_{split}_horizontal"), title,
                 cmap="viridis", extent=ext[split], xlabel="time $t$",
                 ylabel="space $x$", aspect="auto", rel_errs=rel[split])
     print("DONE")

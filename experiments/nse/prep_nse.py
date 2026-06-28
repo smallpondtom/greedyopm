@@ -22,9 +22,9 @@ from pathlib import Path
 
 import numpy as np
 
-SRC = Path("/sessions/loving-gallant-allen/mnt/transient_ns_pbenner")
-RAW = SRC / "nse_snapshots.npz"
-OUT = Path(__file__).resolve().parent / "nse_compressed.npz"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+RAW = DATA_DIR / "nse_snapshots.npz"
+OUT = DATA_DIR / "nse_compressed.npz"
 ENERGY_TOL = 1e-13          # drop POD modes below this relative singular energy
 
 
