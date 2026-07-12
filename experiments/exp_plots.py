@@ -8,9 +8,22 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from mpl_toolkits.axes_grid1 import ImageGrid
 
 from exp_methods import METHOD_STYLES
+
+# Methods whose active nonlinear set spans more than one polynomial degree and
+# should therefore be drawn as a degree-split (stacked) bar.
+_SPLIT_METHOD = "Greedy-OPM (p=[2,3])"
+
+
+def _lighten(color, amount=0.55):
+    """Blend ``color`` toward white by ``amount`` in [0, 1]."""
+    c = np.array(mcolors.to_rgb(color))
+    return tuple(c + (1.0 - c) * amount)
 
 
 def error_vs_r(results, rs, methods, out_prefix, suptitle):
@@ -60,6 +73,21 @@ def _active_count(results, name, r):
     return r * (r + 1) // 2          # Greedy-QM: all quadratic monomials
 
 
+def _active_by_degree(results, name, r):
+    """`{degree(int): count}` breakdown of the active nonlinear features.
+
+    Returns ``None`` when the checkpoint has no per-degree record for this
+    (method, r), in which case the caller falls back to a single bar.
+    """
+    rec = results.get(f"{name}@r={r}")
+    if rec is None:
+        return None
+    bd = rec.get("n_active_by_degree")
+    if not bd:
+        return None
+    return {int(k): int(v) for k, v in bd.items()}
+
+
 def active_features_table(results, rs, methods):
     """Return (header, rows) and print a number-of-active-features table."""
     header = ["r"] + methods
@@ -79,18 +107,52 @@ def active_features_table(results, rs, methods):
 
 
 def active_features_bar(results, rs, methods, out_prefix, suptitle):
-    """Grouped bar chart: number of active nonlinear features vs r."""
+    """Grouped bar chart: number of active nonlinear features vs r.
+
+    ``Greedy-OPM (p=[2,3])`` is drawn as a degree-split (stacked) bar --
+    quadratic (solid, bottom) + cubic (hatched, top) separated by a white
+    divider -- so the quad/cubic composition of its active set is visible.  All
+    other methods stay single bars.  Falls back to a single bar for any entry
+    lacking a per-degree breakdown in the checkpoint.
+    """
     fig, ax = plt.subplots(figsize=(14, 7))
     rs = list(rs)
     x = np.arange(len(rs))
     nm = len(methods)
     width = 0.8 / nm
+    handles = []                                    # ordered legend proxies
     for i, name in enumerate(methods):
-        ys = [_active_count(results, name, r) for r in rs]
+        xpos = x + (i - (nm - 1) / 2) * width
         st = METHOD_STYLES[name]
-        bars = ax.bar(x + (i - (nm - 1) / 2) * width, ys, width,
-                      label=name, color=st["color"], edgecolor="white", lw=0.5)
-        ax.bar_label(bars, fontsize=8, padding=1)
+        # Per-r degree breakdown (quad/cubic) if available for the split method.
+        breakdown = [_active_by_degree(results, name, r) for r in rs]
+        do_split = (name == _SPLIT_METHOD
+                    and all(b is not None for b in breakdown))
+        if do_split:
+            quad = np.array([b.get(2, 0) for b in breakdown], dtype=float)
+            cubic = np.array([b.get(3, 0) for b in breakdown], dtype=float)
+            col_c = _lighten(st["color"], 0.5)
+            bq = ax.bar(xpos, quad, width, color=st["color"],
+                        edgecolor="white", lw=0.6)
+            bc = ax.bar(xpos, cubic, width, bottom=quad, color=col_c,
+                        edgecolor="white", lw=0.6, hatch="///")
+            ax.bar_label(bq, labels=[str(int(v)) if v else "" for v in quad],
+                         label_type="center", fontsize=7, color="white")
+            ax.bar_label(bc, labels=[str(int(v)) if v else "" for v in cubic],
+                         label_type="center", fontsize=7)
+            ax.bar_label(bc, labels=[str(int(q + c)) for q, c in
+                                     zip(quad, cubic)], fontsize=8, padding=1)
+            handles.append(Patch(facecolor=st["color"], edgecolor="white",
+                                 label=f"{name} — quadratic"))
+            handles.append(Patch(facecolor=col_c, edgecolor="white",
+                                 hatch="///", label=f"{name} — cubic"))
+        else:
+            ys = [_active_count(results, name, r) for r in rs]
+            bars = ax.bar(xpos, ys, width, color=st["color"],
+                          edgecolor="white", lw=0.5)
+            ax.bar_label(bars, fontsize=8, padding=1)
+            handles.append(Patch(facecolor=st["color"], edgecolor="white",
+                                 label=name))
     ax.set_xticks(x)
     ax.set_xticklabels(rs)
     ax.set_xlabel(r"Reduced dimension $r$", fontsize=16)
@@ -100,8 +162,86 @@ def active_features_bar(results, rs, methods, out_prefix, suptitle):
     ax.grid(True, axis="y", alpha=0.3)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    ax.legend(fontsize=12, ncol=2, frameon=False)
+    ax.legend(handles=handles, fontsize=12, ncol=2, frameon=False)
     plt.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(f"{out_prefix}.{ext}", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    saved {out_prefix}.png/.pdf")
+
+
+def gamma_sp_study(results, rs, methods, out_prefix, suptitle):
+    """Two-panel gamma_sp study built from the stored validation sweeps.
+
+    Left  : validation reconstruction error vs gamma_sp (one curve per r).
+    Right : number of active nonlinear features vs gamma_sp.
+
+    Curves are colour-graded by reduced dimension r (viridis colorbar); the two
+    Greedy-OPM variants are distinguished by line style, and the selected
+    gamma_sp (sparsest within tolerance of the best validation error) is marked
+    with a star on each curve.  Only entries carrying a ``gamma_sp_curve`` in
+    the checkpoint are drawn, so this is a no-op if the sweep stored none.
+    """
+    opm = [m for m in methods if m in
+           ("Greedy-OPM (p=2)", _SPLIT_METHOD) and any(
+               (results.get(f"{m}@r={r}") or {}).get("gamma_sp_curve")
+               for r in rs)]
+    if not opm:
+        print(f"    [gamma_sp_study] no validation curves to plot; skipped")
+        return
+
+    rs = list(rs)
+    ls_for = {_SPLIT_METHOD: "-", "Greedy-OPM (p=2)": "--"}
+    norm = mcolors.Normalize(vmin=min(rs), vmax=max(rs))
+    cmap = plt.cm.viridis
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(18, 7),
+                                   constrained_layout=True)
+    for name in opm:
+        ls = ls_for.get(name, "-")
+        for r in rs:
+            rec = results.get(f"{name}@r={r}")
+            if not rec or not rec.get("gamma_sp_curve"):
+                continue
+            curve = rec["gamma_sp_curve"]
+            g = np.array([c["gamma_sp"] for c in curve])
+            e = np.array([c["val_err"] for c in curve])
+            na = np.array([c["n_active"] for c in curve])
+            m = g > 0
+            if not np.any(m):
+                continue
+            color = cmap(norm(r))
+            axL.loglog(g[m], e[m], ls, color=color, lw=1.7, alpha=0.9)
+            axR.semilogx(g[m], na[m], ls, color=color, lw=1.7, alpha=0.9)
+            gsel = rec.get("gamma_sp")
+            if gsel is not None:
+                j = int(np.argmin(np.abs(g - gsel)))
+                gx = g[j] if g[j] > 0 else g[m].min()
+                axL.plot(gx, e[j], "*", color=color, ms=13, mec="k",
+                         mew=0.6, zorder=5)
+                axR.plot(gx, na[j], "*", color=color, ms=13, mec="k",
+                         mew=0.6, zorder=5)
+    for ax in (axL, axR):
+        ax.set_xlabel(r"Sparsity parameter $\gamma_{\mathrm{sp}}$", fontsize=16)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.tick_params(labelsize=13)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    axL.set_ylabel("Validation reconstruction error", fontsize=16)
+    axR.set_ylabel("Number of active nonlinear features", fontsize=16)
+    axL.set_title("Validation error vs $\\gamma_{\\mathrm{sp}}$", fontsize=16)
+    axR.set_title("Feature count vs $\\gamma_{\\mathrm{sp}}$", fontsize=16)
+
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=(axL, axR), fraction=0.04, pad=0.02)
+    cbar.set_label(r"Reduced dimension $r$", fontsize=14)
+    handles = [Line2D([0], [0], color="gray", ls=ls_for.get(m, "-"),
+                      lw=2, label=m) for m in opm]
+    handles.append(Line2D([0], [0], marker="*", color="w", mec="k",
+                          ms=12, label=r"selected $\gamma_{\mathrm{sp}}$"))
+    axL.legend(handles=handles, fontsize=12, frameon=False, loc="best")
+    fig.suptitle(suptitle, fontsize=20)
     for ext in ("png", "pdf"):
         fig.savefig(f"{out_prefix}.{ext}", dpi=180, bbox_inches="tight")
     plt.close(fig)

@@ -5,6 +5,8 @@ from .arnoldi import (
     arnoldi_build,
     arnoldi_build_batch,
     arnoldi_eval,
+    arnoldi_eval_grad,
+    arnoldi_grad_batch,
     arnoldi_orthonormality_error,
 )
 from .classical.classical_tensor import evaluate_classical_tensor
@@ -36,6 +38,8 @@ __all__ = [
     "ArnoldiBasis",
     "arnoldi_build",
     "arnoldi_eval",
+    "arnoldi_eval_grad",
+    "arnoldi_grad_batch",
     "arnoldi_orthonormality_error",
     "check_orthonormality",
     "compute_parent_info",

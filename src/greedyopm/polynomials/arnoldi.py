@@ -129,6 +129,63 @@ def _arnoldi_build_jit(
 
 
 @jax.jit
+def _arnoldi_eval_grad_jit(
+    S_hat_new: jnp.ndarray,
+    H: jnp.ndarray,
+    ell_arr: jnp.ndarray,
+    parent_arr: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Joint evaluation of feature values AND gradients at new points.
+
+    Differentiates the stored Arnoldi recurrence (Proposition ``gradient
+    recurrence`` in the stability note): with u = s_ell * psi_parent,
+
+        d_j psi_alpha = ( delta_{j,ell} psi_parent
+                          + s_ell * d_j psi_parent
+                          - sum_{omega < alpha} H[omega, alpha] d_j psi_omega
+                        ) / H[alpha, alpha],
+
+    reusing the SAME well-conditioned H as the forward recurrence, so the
+    gradient pass inherits its numerical stability. Cost O(M^2 r n_pts).
+
+    Returns
+    -------
+    W : (M, n_pts)   feature values.
+    G : (M, r, n_pts) feature gradients, G[k, j, l] = d_j psi_k(s^(l)).
+    """
+    r, n_pts = S_hat_new.shape
+    M = H.shape[0]
+    idx = jnp.arange(M)
+
+    W = jnp.zeros((M, n_pts), dtype=S_hat_new.dtype)
+    W = W.at[0].set(jnp.ones(n_pts, dtype=S_hat_new.dtype))
+    G = jnp.zeros((M, r, n_pts), dtype=S_hat_new.dtype)
+
+    def body(k, state):
+        W, G = state
+        ell = ell_arr[k]
+        j = parent_arr[k]
+        mask = (idx < k).astype(W.dtype)
+        h = H[:, k] * mask
+
+        # values
+        v = S_hat_new[ell] * W[j]
+        v = v - h @ W
+
+        # gradients: product rule + linearity of the orthogonalization
+        gv = S_hat_new[ell][None, :] * G[j]              # (r, n_pts)
+        gv = gv.at[ell].add(W[j])                        # delta_{j,ell} term
+        gv = gv - jnp.einsum("m,mrn->rn", h, G)
+
+        W = W.at[k].set(v / H[k, k])
+        G = G.at[k].set(gv / H[k, k])
+        return W, G
+
+    W, G = jax.lax.fori_loop(1, M, body, (W, G))
+    return W, G
+
+
+@jax.jit
 def _arnoldi_eval_jit(
     S_hat_new: jnp.ndarray,
     H: jnp.ndarray,
@@ -204,6 +261,50 @@ def arnoldi_eval(S_hat_new: jnp.ndarray, basis: ArnoldiBasis) -> jnp.ndarray:
     return _arnoldi_eval_jit(
         S_hat_new, basis.H, basis.ell_arr, basis.parent_arr,
     )
+
+
+def arnoldi_eval_grad(
+    S_hat_new: jnp.ndarray, basis: ArnoldiBasis,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate feature values and gradients at new coordinates.
+
+    Returns
+    -------
+    W : (M, n_pts)    values  psi_k(s^(l)).
+    G : (M, r, n_pts) gradients  d_j psi_k(s^(l)).
+    """
+    return _arnoldi_eval_grad_jit(
+        S_hat_new, basis.H, basis.ell_arr, basis.parent_arr,
+    )
+
+
+def arnoldi_grad_batch(
+    S_hat_batch: jnp.ndarray,
+    H_batch: jnp.ndarray,
+    ell_arr: jnp.ndarray,
+    parent_arr: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Vectorised value+gradient evaluation over a batch of bases.
+
+    Used inside the greedy loop: candidate ``c`` has its own recurrence
+    matrix ``H_batch[c]`` (from :func:`arnoldi_build_batch`) and its own
+    probe coordinates ``S_hat_batch[c]``.
+
+    Arguments
+    ---------
+    S_hat_batch : (B, r, n_pts)
+    H_batch : (B, M, M)
+    ell_arr, parent_arr : (M,) shared parent maps.
+
+    Returns
+    -------
+    W_batch : (B, M, n_pts)
+    G_batch : (B, M, r, n_pts)
+    """
+    fn = partial(
+        _arnoldi_eval_grad_jit, ell_arr=ell_arr, parent_arr=parent_arr,
+    )
+    return jax.vmap(lambda S, H: fn(S, H))(S_hat_batch, H_batch)
 
 
 def arnoldi_build_batch(

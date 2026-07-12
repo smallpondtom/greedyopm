@@ -46,9 +46,12 @@ import jax.numpy as jnp
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))                              # experiments/
 DATA_DIR = _HERE / "data"
-from exp_methods import build_model, METHOD_NAMES, METHOD_STYLES   # noqa: E402
-from exp_plots import (error_vs_r,                                 # noqa: E402
+from exp_methods import (build_model, METHOD_NAMES, METHOD_STYLES,  # noqa: E402
+                         fit_opm_tuned, _OPM_METHODS, _OPM_DEGREES,
+                         _active_by_degree)
+from exp_plots import (error_vs_r, gamma_sp_study,                 # noqa: E402
                        active_features_table, active_features_bar)
+from exp_split import split_indices                                # noqa: E402
 
 RAW = DATA_DIR / "nse_snapshots.npz"
 PLOTS = _HERE / "plots"
@@ -65,6 +68,8 @@ CFG = dict(
     geelen_rel=0.10,
     geelen_iters=400,
     tau=1e-3,
+    gamma_sp_points=24,    # gamma_sp grid resolution for the validation sweep
+    gamma_sp_tol=0.02,     # accept sparsest gamma_sp within 2% of best val error
 )
 # Full-data fits are expensive; default to "no budget" (run to completion in one
 # call), but allow a finite wall-clock budget for resumable runs.
@@ -72,20 +77,32 @@ TIME_BUDGET = float(os.environ.get("NSE_FULL_BUDGET", "1e9"))
 
 
 def load():
-    """Load the raw snapshots and derive the train/test split + output matrix."""
+    """Load the raw snapshots and derive the train/val/test split + outputs.
+
+    Fixed-seed random 50/25/25 split; the validation set tunes the Greedy-OPM
+    gamma_sp and the test set is held out for the reported errors.  All splits
+    are centered with the *training* mean.  The full time-ordered trajectory is
+    also returned (for the y(t) timeseries plot).
+    """
     d = np.load(RAW)
     V = d["V"].astype(np.float64)            # (d, 2000)
-    trange = d["trange"]
+    trange = np.asarray(d["trange"])
     C = d["C"].astype(np.float64)            # (6, d)
-    V_tr, V_te = V[:, ::2], V[:, 1::2]
-    t_tr, t_te = trange[::2], trange[1::2]
+    itr, iva, ite = split_indices(V.shape[1])
+    V_tr, V_va, V_te = V[:, itr], V[:, iva], V[:, ite]
+    t_tr, t_va, t_te = trange[itr], trange[iva], trange[ite]
     s_ref = V_tr.mean(axis=1, keepdims=True)             # training mean
     nrm_tr = float(np.linalg.norm(V_tr - s_ref))         # centered training norm
+    nrm_va = float(np.linalg.norm(V_va - s_ref))         # centered validation norm
     nrm_te = float(np.linalg.norm(V_te - s_ref))         # centered test norm
     Y_tr = C @ V_tr                                      # (6, ntr)
+    Y_va = C @ V_va                                      # (6, nva)
     Y_te = C @ V_te                                      # (6, nte)
-    return dict(V_tr=V_tr, V_te=V_te, Y_tr=Y_tr, Y_te=Y_te,
-                t_tr=t_tr, t_te=t_te, nrm_tr=nrm_tr, nrm_te=nrm_te,
+    return dict(V_tr=V_tr, V_va=V_va, V_te=V_te,
+                Y_tr=Y_tr, Y_va=Y_va, Y_te=Y_te,
+                t_tr=t_tr, t_va=t_va, t_te=t_te,
+                nrm_tr=nrm_tr, nrm_va=nrm_va, nrm_te=nrm_te,
+                V_all=V, Y_all=C @ V, t_all=trange, idx_test=ite,
                 C=C, d=int(V.shape[0]))
 
 
@@ -122,11 +139,12 @@ def _block(model):
 
 def run_sweep(D, budget=TIME_BUDGET):
     res = json.load(open(CKPT)) if CKPT.exists() else {}
-    V_tr, V_te = D["V_tr"], D["V_te"]
-    Y_tr, Y_te = D["Y_tr"], D["Y_te"]
+    V_tr, V_va, V_te = D["V_tr"], D["V_va"], D["V_te"]
+    Y_tr, Y_va, Y_te = D["Y_tr"], D["Y_va"], D["Y_te"]
     C = D["C"]
-    ntr, nte = D["nrm_tr"], D["nrm_te"]
+    ntr, nva, nte = D["nrm_tr"], D["nrm_va"], D["nrm_te"]
     V_tr_j = jnp.asarray(V_tr)                  # device once (not per-fit)
+    V_va_j = jnp.asarray(V_va)
     t0 = time.time(); did = False
     for r in RS:
         for nm in METHOD_NAMES:
@@ -136,17 +154,32 @@ def run_sweep(D, budget=TIME_BUDGET):
             if did and time.time() - t0 > budget:
                 _save(res); print("[budget] pausing; rerun to continue"); return res, False
             tic = time.time()
-            model = _block(build_model(nm, V_tr_j, r, CFG))
-            fit_secs = round(time.time() - tic, 3)     # fit-only wall time (blocked)
+            if nm in _OPM_METHODS:
+                # Fit once, tune gamma_sp on the validation split (full-state
+                # reconstruction error), then prune to the selected value.
+                model, gsp, curve = fit_opm_tuned(
+                    V_tr_j, V_va_j, r, _OPM_DEGREES[nm], CFG)
+                _block(model)
+            else:
+                model = _block(build_model(nm, V_tr_j, r, CFG))
+                gsp, curve = None, None
+            fit_secs = round(time.time() - tic, 3)     # fit + tuning wall time
             s_tr, o_tr = _metrics(model, V_tr, Y_tr, ntr, C)
+            s_va, o_va = _metrics(model, V_va, Y_va, nva, C)
             s_te, o_te = _metrics(model, V_te, Y_te, nte, C)
-            res[key] = dict(method=nm, r=int(r), state_train=s_tr, state_test=s_te,
-                            out_train=o_tr, out_test=o_te, n_active=_n_active(model),
+            res[key] = dict(method=nm, r=int(r),
+                            state_train=s_tr, state_val=s_va, state_test=s_te,
+                            out_train=o_tr, out_val=o_va, out_test=o_te,
+                            n_active=_n_active(model),
+                            n_active_by_degree=_active_by_degree(model),
+                            gamma_sp=(None if gsp is None else float(gsp)),
+                            gamma_sp_curve=curve,
                             fit_secs=fit_secs,
                             secs=round(time.time() - tic, 2))
             did = True
+            gtxt = f" gsp={gsp:.2e}" if gsp is not None else ""
             print(f"  r={r:2d} {nm:24s} state(te)={s_te:.3e} out(te)={o_te:.3e} "
-                  f"act={res[key]['n_active']:>3d} ({res[key]['secs']}s)")
+                  f"act={res[key]['n_active']:>3d}{gtxt} ({res[key]['secs']}s)")
             _save(res)
     _save(res); return res, True
 
@@ -156,31 +189,36 @@ def _save(res):
     json.dump(res, open(CKPT, "w"), indent=0)
 
 
-def timeseries(D):
-    """y(t) = C x for each method vs ground truth, full interleaved trajectory."""
-    V_tr, V_te = jnp.asarray(D["V_tr"]), jnp.asarray(D["V_te"])
-    Y_tr, Y_te = D["Y_tr"], D["Y_te"]
-    C = D["C"]
-    t_tr, t_te = D["t_tr"], D["t_te"]
-    n_out = Y_tr.shape[0]
-    ntot = Y_tr.shape[1] + Y_te.shape[1]
+def timeseries(D, res):
+    """y(t) = C x for each method vs ground truth over the full trajectory.
 
-    tfull = np.empty(ntot); tfull[::2] = t_tr; tfull[1::2] = t_te
-    Ytrue = np.empty((n_out, ntot)); Ytrue[:, ::2] = Y_tr; Ytrue[:, 1::2] = Y_te
+    Models are fit on the random train subset; here they reconstruct the FULL
+    time-ordered trajectory (so the curves are coherent in time) and the
+    held-out test snapshots are marked with dots.  Greedy-OPM models use their
+    validation-tuned gamma_sp (read from the checkpoint)."""
+    V_tr = jnp.asarray(D["V_tr"])
+    C = D["C"]
+    t = np.asarray(D["t_all"])
+    order = np.argsort(t)                                 # ensure time order
+    tfull = t[order]
+    Vfull = jnp.asarray(D["V_all"][:, order])
+    Ytrue = np.asarray(D["Y_all"])[:, order]
+    test_pt = np.isin(order, np.asarray(D["idx_test"]))   # test cols, in t-order
+    n_out = Ytrue.shape[0]
 
     ymethods = {}
     for nm in METHOD_NAMES:
-        model = build_model(nm, V_tr, R_OUT, CFG)
-        ye = C @ np.asarray(model.reconstruct(V_tr))
-        yo = C @ np.asarray(model.reconstruct(V_te))
-        yf = np.empty((n_out, ntot)); yf[:, ::2] = ye; yf[:, 1::2] = yo
-        ymethods[nm] = yf
+        gsp = (res.get(f"{nm}@r={R_OUT}") or {}).get("gamma_sp")
+        model = build_model(nm, V_tr, R_OUT, CFG, gamma_sp=gsp)
+        ymethods[nm] = C @ np.asarray(model.reconstruct(Vfull))
 
     fig, axes = plt.subplots(3, 2, figsize=(18, 11), sharex=True)
     axes = axes.ravel()
     for i in range(n_out):
         ax = axes[i]
         ax.plot(tfull, Ytrue[i], color="k", lw=2.4, label="Ground truth", zorder=10)
+        ax.scatter(tfull[test_pt], Ytrue[i][test_pt], s=10, color="k",
+                   alpha=0.55, zorder=11, label="test snapshots")
         for nm in METHOD_NAMES:
             st = METHOD_STYLES[nm]
             ls = "--" if "--" in st["fmt"] else "-"
@@ -195,7 +233,8 @@ def timeseries(D):
     fig.legend(h, l, loc="lower center", ncol=4, fontsize=13,
                bbox_to_anchor=(0.5, -0.04), frameon=False)
     fig.suptitle(f"Karman vortex (full data) — sensor outputs $y(t)=Cx$  (r={R_OUT}, "
-                 f"reconstruction of full trajectory)", fontsize=18, y=1.0)
+                 f"full trajectory; model trained on random 50%, dots = held-out "
+                 f"test snapshots)", fontsize=18, y=1.0)
     plt.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(str(PLOTS / f"nse_output_timeseries_full.{ext}"), dpi=160,
@@ -206,8 +245,8 @@ def timeseries(D):
 
 def main(phase="all"):
     D = load()
-    print(f"[nse-full] d={D['d']} train {D['V_tr'].shape} test {D['V_te'].shape}"
-          f"  n_outputs={D['Y_tr'].shape[0]}  phase={phase}")
+    print(f"[nse-full] d={D['d']} train {D['V_tr'].shape} val {D['V_va'].shape} "
+          f"test {D['V_te'].shape}  n_outputs={D['Y_tr'].shape[0]}  phase={phase}")
     if phase in ("all", "sweep"):
         res, done = run_sweep(D, budget=TIME_BUDGET)
         if not done:
@@ -225,6 +264,10 @@ def main(phase="all"):
                    "Karman vortex (full data) — full-state reconstruction error vs reduced dimension")
         error_vs_r(res_out, RS, METHOD_NAMES, str(PLOTS / "nse_output_error_vs_r_full"),
                    "Karman vortex (full data) — sensor-output error $\\|y-\\hat y\\|/\\|y\\|$ vs reduced dimension")
+    if phase in ("all", "study"):
+        gamma_sp_study(res, RS, METHOD_NAMES,
+                       str(PLOTS / "nse_gamma_sp_study_full"),
+                       "Karman vortex (full data) — gamma_sp validation study")
     if phase in ("all", "active"):
         print("\n[nse-full] number of active nonlinear features:")
         active_features_table(res, RS, METHOD_NAMES)
@@ -232,7 +275,7 @@ def main(phase="all"):
                             str(PLOTS / "nse_active_features_full"),
                             "Karman vortex (full data) — active nonlinear features vs reduced dimension")
     if phase in ("all", "timeseries"):
-        timeseries(D)
+        timeseries(D, res)
     print("DONE")
 
 

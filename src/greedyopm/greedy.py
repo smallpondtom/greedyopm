@@ -44,6 +44,8 @@ from .polynomials.arnoldi import (
     arnoldi_build,
     arnoldi_build_batch,
     arnoldi_eval,
+    arnoldi_eval_grad,
+    arnoldi_grad_batch,
 )
 from .polynomials.classical.classical_tensor import (
     _FAMILY_DISPATCH,
@@ -124,6 +126,30 @@ class GreedyOPM:
         fixed span, so the selected modes are independent of this choice.
     center : bool
         Whether to subtract the snapshot mean before SVD.
+    mu : float
+        Stability (Jacobian) regularization weight.  With ``mu > 0`` the
+        per-feature gain is divided by ``c_k = n + gamma + mu * E_k`` where
+        ``E_k`` is the empirical Dirichlet energy of feature k (mean squared
+        gradient norm over the probe points), the greedy mode score becomes
+        ``sigma^2 + sum_active (n ||r_k|| - gamma_sp)^2 / c_k``, and the final
+        lifting columns are shrunk by ``n / c_k``.  ``mu = 0`` reproduces the
+        original algorithm exactly.  Requires ``ortho_method='arnoldi'``.
+    n_grad_samples : int, optional
+        Number of (evenly spaced) training snapshots used as probe points for
+        the gradient pass in the greedy loop.  ``None`` uses all n snapshots.
+    grad_dilation : float
+        Dilation ``delta >= 0`` of the probe coordinates about the reference
+        state: gradients are evaluated at ``(1 + delta) * s_hat``, probing the
+        out-of-distribution collar where instability manifests.
+    stability_aware_activation : bool
+        If True, use the weighted activation rule
+        ``||r_k|| > (gamma_sp / n) * sqrt(c_k / n)`` (the exact solution of
+        the stability-penalized best-subset problem; Remark `stability-aware
+        activation` in the note) instead of the mu-invariant threshold.
+        Features with very large Dirichlet energy are then removed outright
+        rather than merely shrunk.  Default False: the activation set stays
+        independent of ``mu``, which keeps ``gamma_sp`` re-thresholding
+        sweeps cheap and mu-ablations comparable.
     """
 
     def __init__(
@@ -140,12 +166,35 @@ class GreedyOPM:
         basis: Literal["hybrid", "hierarchical"] = "hybrid",
         ortho_method: Literal["qr", "cholesky", "arnoldi"] = "arnoldi",
         center: bool = True,
+        mu: float = 0.0,
+        n_grad_samples: Optional[int] = None,
+        grad_dilation: float = 0.0,
+        stability_aware_activation: bool = False,
     ):
         if ortho_method not in _ORTHO_METHODS:
             raise ValueError(
                 f"ortho_method must be one of {_ORTHO_METHODS}; got {ortho_method!r}."
             )
         _validate_ortho_family(ortho_method, family, "GreedyOPM")
+        if mu < 0.0:
+            raise ValueError(f"mu must be >= 0; got {mu}.")
+        if mu > 0.0 and ortho_method != "arnoldi":
+            raise ValueError(
+                "Stability regularization (mu > 0) requires "
+                "ortho_method='arnoldi' (the gradient recurrence reuses the "
+                "stored Arnoldi H)."
+            )
+        self.mu = float(mu)
+        self.n_grad_samples = n_grad_samples
+        self.grad_dilation = float(grad_dilation)
+        self.stability_aware_activation = bool(stability_aware_activation)
+        if self.stability_aware_activation and mu == 0.0:
+            warnings.warn(
+                "stability_aware_activation=True has (almost) no effect when "
+                "mu == 0: the weighted threshold reduces to the plain one up "
+                "to the factor sqrt(1 + gamma/n).",
+                stacklevel=2,
+            )
 
         self.r = r
         self.s = s
@@ -178,6 +227,8 @@ class GreedyOPM:
         d, n = S.shape
         n_f = jnp.asarray(float(n), dtype=S.dtype)
         gamma_sp_f = jnp.asarray(float(self.gamma_sp), dtype=S.dtype)
+        gamma_f = jnp.asarray(float(self.gamma), dtype=S.dtype)
+        mu_f = jnp.asarray(float(self.mu), dtype=S.dtype)
 
         # --- 1. Center ----------------------------------------------------
         if self.center:
@@ -232,7 +283,7 @@ class GreedyOPM:
             all_mi_np = np.asarray(all_mi_np, dtype=np.int32)
 
             # -- 3c. Batched full Arnoldi over candidates -----------------
-            Psi_all, _, _, _ = arnoldi_build_batch(
+            Psi_all, H_all, ell_arr_i, parent_arr_i = arnoldi_build_batch(
                 trial_S_hat_all, all_mi_np, n_reorth=n_reorth_eff,
             )                                                          # (n_cand, M_i, n)
 
@@ -259,7 +310,39 @@ class GreedyOPM:
 
             threshold_sq = (gamma_sp_f * inv_n) ** 2
             active_mask = norms_sq > threshold_sq
-            poly_gain = n_f * jnp.sum(norms_sq * active_mask, axis=1)  # (n_cand,)
+
+            if self.mu > 0.0:
+                # -- 3e'. Stability-regularized gains ----------------------
+                # Gradient pass (differentiated Arnoldi recurrence) on the
+                # (subsampled, dilated) probe coordinates; per-feature
+                # empirical Dirichlet energies E_k; regularized gain
+                # (n ||r_k|| - gamma_sp)_+^2 / (n + gamma + mu E_k).
+                probe = trial_S_hat_all[:, :, self._probe_idx(n)]
+                probe = (1.0 + self.grad_dilation) * probe
+                _, G_all = arnoldi_grad_batch(
+                    probe, H_all, ell_arr_i, parent_arr_i,
+                )                                     # (n_cand, M_i, i+1, n_g)
+                G_nl = G_all[:, nl_start:, :, :]
+                dir_energy = jnp.mean(
+                    jnp.sum(G_nl ** 2, axis=2), axis=2,
+                )                                     # (n_cand, m_nl)
+                c_k = n_f + gamma_f + mu_f * dir_energy
+                norms = jnp.sqrt(jnp.maximum(norms_sq, 0.0))
+                if self.stability_aware_activation:
+                    # Weighted rule (stability-penalized best-subset):
+                    # active iff ||r_k|| > (gamma_sp/n) sqrt(c_k/n).
+                    gamma_sp_k = gamma_sp_f * jnp.sqrt(c_k / n_f)
+                    active_mask = norms_sq > threshold_sq * (c_k / n_f)
+                else:
+                    gamma_sp_k = gamma_sp_f
+                gain = (n_f * norms - gamma_sp_k) ** 2 / c_k
+                poly_gain = jnp.sum(
+                    jnp.where(active_mask, gain, 0.0), axis=1,
+                )                                                      # (n_cand,)
+            else:
+                poly_gain = n_f * jnp.sum(
+                    norms_sq * active_mask, axis=1,
+                )                                                      # (n_cand,)
             delta = sigma_cands ** 2 + poly_gain                       # argmax score
 
             # # -- 3d. NL block projections in the SVD-reduced space --------
@@ -350,26 +433,38 @@ class GreedyOPM:
                     self.eff_rank_ = int(factor.shape[0])
 
         # --- 5. Global active set and final lifting matrix ----------------
+        # Store the FULL nonlinear correlation C_nl_ once.  For any gamma_sp the
+        # active set and debiased lifting are then a cheap re-thresholding of
+        # C_nl_ (see :meth:`set_sparsity`), so sweeping gamma_sp needs only ONE
+        # greedy fit rather than a refit per value.
         E_final = S_tilde - self.U_r_ @ self.S_hat_                    # (d, n)
         P_nl_final = self.Psi_[self.n_linear_:]                        # (m_nl, n)
         self.m_nl_ = int(P_nl_final.shape[0])
 
-        C_nl = (1.0 / n) * (E_final @ P_nl_final.T)                    # (d, m_nl)
-        self.importances_ = jnp.sum(C_nl ** 2, axis=0)                 # (m_nl,)
+        self.C_nl_ = (1.0 / n) * (E_final @ P_nl_final.T)             # (d, m_nl)
+        self.importances_ = jnp.sum(self.C_nl_ ** 2, axis=0)         # (m_nl,)
 
-        threshold = self.gamma_sp / n
-        norms = jnp.sqrt(self.importances_)
-        active_nl_mask = norms > threshold
-        active_nl_local = jnp.where(active_nl_mask)[0]
-        global_nl_active = self.n_linear_ + active_nl_local
-        self.active_nl_global_ = global_nl_active
+        # Final per-feature Dirichlet energies (stability note, eq. (11)):
+        # E_k = mean_l || grad psi_k(s_hat^(l)) ||^2 over the probe points.
+        # Used to shrink the lifting columns by n / (n + gamma + mu E_k).
+        if self.mu > 0.0:
+            probe = (1.0 + self.grad_dilation) * self.S_hat_[:, self._probe_idx(n)]
+            _, G_final = arnoldi_eval_grad(probe, self.arnoldi_basis_)
+            G_nl_final = G_final[self.n_linear_:]                    # (m_nl, r, n_g)
+            self.dirichlet_nl_ = jnp.mean(
+                jnp.sum(G_nl_final ** 2, axis=1), axis=1,
+            )                                                         # (m_nl,)
+        else:
+            self.dirichlet_nl_ = jnp.zeros(self.m_nl_, dtype=S.dtype)
 
-        P_active = self.Psi_[global_nl_active]                         # (|A|, n)
-        self.Vbar_nl_ = (1.0 / (n + self.gamma)) * (E_final @ P_active.T)
+        # Total polynomial degree of every feature (row of multi_indices_),
+        # used to break the active nonlinear set down by degree (quad/cubic/…).
+        self.feature_degrees_ = (
+            self._multi_indices_np_.sum(axis=1).astype(np.int32)
+        )
 
-        linear_indices = jnp.arange(self.n_linear_)
-        self.selected_ = jnp.concatenate([linear_indices, global_nl_active])
-        self.Psi_selected_ = self.Psi_[self.selected_]
+        # Compute active_nl_global_, Vbar_nl_, selected_ for the current gamma_sp.
+        self.set_sparsity(self.gamma_sp)
 
         # Cache normalization params (used only for the classical-family paths)
         if self.ortho_method != "arnoldi" and self.basis == "hybrid":
@@ -377,6 +472,144 @@ class GreedyOPM:
 
         self._fitted = True
         return self
+
+    # =====================================================================
+    # Stability helpers
+    # =====================================================================
+
+    def _probe_idx(self, n: int) -> np.ndarray:
+        """Evenly spaced snapshot indices used as gradient probe points."""
+        if self.n_grad_samples is None or int(self.n_grad_samples) >= n:
+            return np.arange(n)
+        return np.unique(
+            np.linspace(0, n - 1, int(self.n_grad_samples)).astype(np.int64)
+        )
+
+    def lipschitz_certificate(
+        self,
+        *,
+        dilation: Optional[float] = None,
+        S_hat: Optional[jnp.ndarray] = None,
+    ) -> float:
+        """A posteriori decoder Lipschitz certificate.
+
+        Computes  ``L_hat = sqrt(1 + (sum_k ||vbar_k|| * L_hat_psi_k)^2)``
+        (per-feature stability budget, Lemma `per-feature budget` of the
+        stability note), where ``L_hat_psi_k`` is the max gradient norm of
+        active feature k over the probe set -- by default the training
+        coordinates dilated by ``dilation`` about the reference state.
+
+        The certificate upper-bounds the decoder's local Lipschitz constant
+        on the probed set; combined with the OOD theorem it yields
+        ``||s - Gamma(E(s))|| <= (1 + L_hat) dist(s, training) + max_l eps_l``.
+
+        Arguments
+        ---------
+        dilation : float, optional
+            Dilation factor (defaults to ``self.grad_dilation``).  Ignored
+            when ``S_hat`` is given.
+        S_hat : (r, n_pts), optional
+            Explicit probe coordinates.
+
+        Returns
+        -------
+        float
+        """
+        if self.ortho_method != "arnoldi":
+            raise ValueError(
+                "lipschitz_certificate requires ortho_method='arnoldi'."
+            )
+        if S_hat is None:
+            delta = self.grad_dilation if dilation is None else float(dilation)
+            S_hat = (1.0 + delta) * self.S_hat_
+        _, G = arnoldi_eval_grad(S_hat, self.arnoldi_basis_)
+        G_act = G[self.active_nl_global_]                 # (mA, r, n_pts)
+        # L_hat_psi_k = max over probe points of || grad psi_k ||_2
+        L_psi = jnp.sqrt(jnp.max(jnp.sum(G_act ** 2, axis=1), axis=1))
+        v_norms = jnp.linalg.norm(self.Vbar_nl_, axis=0)  # (mA,)
+        budget = jnp.sum(v_norms * L_psi)
+        return float(jnp.sqrt(1.0 + budget ** 2))
+
+    def decoder_jacobian_norms(self, S_hat: jnp.ndarray) -> jnp.ndarray:
+        """Pointwise spectral norms ``||J_Gamma(s_hat)||_2`` at given coords.
+
+        Uses the splitting ``||J_Gamma||^2 = 1 + ||Vbar J_p||^2`` (Lemma
+        `Jacobian splitting`), evaluating the second term exactly through the
+        Gram matrix ``Vbar^T Vbar`` so no d-dimensional object appears per
+        point.
+
+        Arguments
+        ---------
+        S_hat : (r, n_pts)
+
+        Returns
+        -------
+        (n_pts,) array of local Lipschitz constants.
+        """
+        if self.ortho_method != "arnoldi":
+            raise ValueError(
+                "decoder_jacobian_norms requires ortho_method='arnoldi'."
+            )
+        _, G = arnoldi_eval_grad(S_hat, self.arnoldi_basis_)
+        Jp = G[self.active_nl_global_]                    # (mA, r, n_pts)
+        M_gram = self.Vbar_nl_.T @ self.Vbar_nl_          # (mA, mA)
+
+        def one_point(Jp_pt):
+            A = Jp_pt.T @ (M_gram @ Jp_pt)                # (r, r)
+            lam = jnp.linalg.eigvalsh(A)[-1]
+            return jnp.sqrt(1.0 + jnp.maximum(lam, 0.0))
+
+        return jax.vmap(one_point, in_axes=2)(Jp)
+
+    # =====================================================================
+    # Sparsity re-thresholding  (cheap gamma_sp sweep -- no refit)
+    # =====================================================================
+
+    def set_sparsity(self, gamma_sp: float) -> "GreedyOPM":
+        """Re-threshold the active nonlinear set for a new ``gamma_sp``.
+
+        Reuses the stored full-basis correlation ``C_nl_`` and per-feature
+        importances from the single greedy fit, so sweeping ``gamma_sp`` costs
+        only O(d · |active|) with no SVD / Arnoldi rebuild.  A feature k is
+        active iff ``sqrt(importance_k) > gamma_sp / n``, and the debiased
+        lifting for the active columns is ``(n / (n + gamma)) · C_nl_[:, A]`` --
+        identical to the value a full fit would produce for that active set,
+        since ``C_nl_ = (1/n) E P_nl^T`` and ``Vbar = (1/(n+gamma)) E P_A^T``.
+        """
+        self.gamma_sp = float(gamma_sp)
+        n = int(self.Psi_.shape[1])
+        norms = jnp.sqrt(self.importances_)
+        if self.stability_aware_activation:
+            # Weighted rule: ||r_k|| > (gamma_sp/n) sqrt(c_k/n).
+            c = n + self.gamma + self.mu * self.dirichlet_nl_
+            threshold = (self.gamma_sp / n) * jnp.sqrt(c / n)
+        else:
+            threshold = self.gamma_sp / n
+        active_nl_local = jnp.where(norms > threshold)[0]
+        self.active_nl_global_ = self.n_linear_ + active_nl_local
+        # Stability-aware shrinkage n / c_k with c_k = n + gamma + mu * E_k
+        # (Theorem `one-step solution`; mu = 0 recovers n / (n + gamma)).
+        shrink = n / (
+            n + self.gamma + self.mu * self.dirichlet_nl_[active_nl_local]
+        )
+        self.Vbar_nl_ = shrink[None, :] * self.C_nl_[:, active_nl_local]
+        linear_indices = jnp.arange(self.n_linear_)
+        self.selected_ = jnp.concatenate(
+            [linear_indices, self.active_nl_global_],
+        )
+        self.Psi_selected_ = self.Psi_[self.selected_]
+        return self
+
+    @property
+    def active_degree_counts(self) -> dict:
+        """Map ``{degree: n_active_features}`` for the active nonlinear set.
+
+        E.g. for ``p=[2,3]`` returns ``{2: n_quadratic, 3: n_cubic}`` counting
+        only the currently active (post-thresholding) nonlinear features.
+        """
+        active = np.asarray(self.active_nl_global_)
+        degs = self.feature_degrees_[active]
+        return {int(q): int(np.count_nonzero(degs == q)) for q in self.degrees_}
 
     # =====================================================================
     # Rebuild helpers (QR / Cholesky paths)
@@ -574,6 +807,9 @@ class GreedyOPM:
             "total_selected": self.n_total_features,
             "gamma_sp": self.gamma_sp,
             "gamma": self.gamma,
+            "mu": self.mu,
+            "grad_dilation": self.grad_dilation,
+            "stability_aware_activation": self.stability_aware_activation,
             "family": self.family,
             "basis": self.basis,
             "ortho_method": self.ortho_method,
@@ -898,6 +1134,8 @@ class GreedyFixedOPM:
         all_indices_np = np.asarray(all_indices_np)
         self.multi_indices_ = jnp.array(all_indices_np)
         self._multi_indices_np_ = all_indices_np
+        # Total polynomial degree of every feature (used for degree breakdown).
+        self.feature_degrees_ = all_indices_np.sum(axis=1).astype(np.int32)
 
         max_deg_final = (
             int(np.max(all_indices_np)) if len(all_indices_np) > 0 else 0
@@ -1077,6 +1315,14 @@ class GreedyFixedOPM:
     @property
     def selected_modes(self) -> np.ndarray:
         return self.J_
+
+    @property
+    def active_degree_counts(self) -> dict:
+        """Map ``{degree: n_active_features}`` for the (all-active) NL set."""
+        active = np.asarray(self.active_nl_global_)
+        degs = self.feature_degrees_[active]
+        degrees = getattr(self, "degrees_eff_", self.degrees_)
+        return {int(q): int(np.count_nonzero(degs == q)) for q in degrees}
 
     def summary(self) -> dict:
         m_total = int(self.Psi_.shape[0])

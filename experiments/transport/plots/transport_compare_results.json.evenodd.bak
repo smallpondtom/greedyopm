@@ -1,0 +1,482 @@
+{
+"POD@r=1": {
+"method": "POD",
+"r": 1,
+"train": 0.952219047999037,
+"test": 0.9521757859571899,
+"n_active": -1,
+"secs": 0.47
+},
+"Greedy-QM@r=1": {
+"method": "Greedy-QM",
+"r": 1,
+"train": 0.9380736720790424,
+"test": 0.9380152405204338,
+"n_active": -1,
+"secs": 1.15
+},
+"Geelen-QM@r=1": {
+"method": "Geelen-QM",
+"r": 1,
+"train": 0.9380736720790426,
+"test": 0.9380152405204338,
+"n_active": 1,
+"secs": 0.45
+},
+"Greedy-Fixed-OPM (p=2)@r=1": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 1,
+"train": 0.9140025721744397,
+"test": 0.9139810418542517,
+"n_active": 1,
+"secs": 0.72
+},
+"Greedy-OPM (p=2)@r=1": {
+"method": "Greedy-OPM (p=2)",
+"r": 1,
+"train": 0.9140025721744397,
+"test": 0.9139810418542517,
+"n_active": 1,
+"secs": 0.74
+},
+"Greedy-OPM (p=[2,3])@r=1": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 1,
+"train": 0.8703047945268276,
+"test": 0.8702575001649818,
+"n_active": 2,
+"secs": 0.94
+},
+"POD@r=2": {
+"method": "POD",
+"r": 2,
+"train": 0.9031016487758229,
+"test": 0.9030135877098947,
+"n_active": -1,
+"secs": 0.17
+},
+"Greedy-QM@r=2": {
+"method": "Greedy-QM",
+"r": 2,
+"train": 0.802460882360083,
+"test": 0.8022677051922862,
+"n_active": -1,
+"secs": 0.86
+},
+"Geelen-QM@r=2": {
+"method": "Geelen-QM",
+"r": 2,
+"train": 0.8266066907764916,
+"test": 0.8264350889591371,
+"n_active": 3,
+"secs": 0.51
+},
+"Greedy-Fixed-OPM (p=2)@r=2": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 2,
+"train": 0.7757885420823485,
+"test": 0.7757164187325696,
+"n_active": 3,
+"secs": 0.73
+},
+"Greedy-OPM (p=2)@r=2": {
+"method": "Greedy-OPM (p=2)",
+"r": 2,
+"train": 0.7757885420823485,
+"test": 0.7757164187325696,
+"n_active": 3,
+"secs": 0.66
+},
+"Greedy-OPM (p=[2,3])@r=2": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 2,
+"train": 0.5914906115275103,
+"test": 0.5912236426510551,
+"n_active": 7,
+"secs": 1.0
+},
+"POD@r=3": {
+"method": "POD",
+"r": 3,
+"train": 0.8534519908829694,
+"test": 0.8533199429034443,
+"n_active": -1,
+"secs": 0.13
+},
+"Greedy-QM@r=3": {
+"method": "Greedy-QM",
+"r": 3,
+"train": 0.659163476311308,
+"test": 0.6588678686450357,
+"n_active": -1,
+"secs": 0.91
+},
+"Geelen-QM@r=3": {
+"method": "Geelen-QM",
+"r": 3,
+"train": 0.7184388110839105,
+"test": 0.7181439448575675,
+"n_active": 6,
+"secs": 0.46
+},
+"Greedy-Fixed-OPM (p=2)@r=3": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 3,
+"train": 0.5952134702655758,
+"test": 0.5949521066001193,
+"n_active": 6,
+"secs": 0.72
+},
+"Greedy-OPM (p=2)@r=3": {
+"method": "Greedy-OPM (p=2)",
+"r": 3,
+"train": 0.5952134702655758,
+"test": 0.5949521066001193,
+"n_active": 6,
+"secs": 0.7
+},
+"Greedy-OPM (p=[2,3])@r=3": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 3,
+"train": 0.24799734860244713,
+"test": 0.24797521406008152,
+"n_active": 16,
+"secs": 1.13
+},
+"POD@r=4": {
+"method": "POD",
+"r": 4,
+"train": 0.8031475481674261,
+"test": 0.8029719630175254,
+"n_active": -1,
+"secs": 0.14
+},
+"Greedy-QM@r=4": {
+"method": "Greedy-QM",
+"r": 4,
+"train": 0.5241024449515357,
+"test": 0.5236243781476255,
+"n_active": -1,
+"secs": 1.02
+},
+"Geelen-QM@r=4": {
+"method": "Geelen-QM",
+"r": 4,
+"train": 0.5644484439332926,
+"test": 0.5640230645653102,
+"n_active": 10,
+"secs": 0.49
+},
+"Greedy-Fixed-OPM (p=2)@r=4": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 4,
+"train": 0.3854419696767012,
+"test": 0.3850685654536226,
+"n_active": 10,
+"secs": 0.75
+},
+"Greedy-OPM (p=2)@r=4": {
+"method": "Greedy-OPM (p=2)",
+"r": 4,
+"train": 0.3854419696767011,
+"test": 0.38506856545362267,
+"n_active": 10,
+"secs": 0.76
+},
+"Greedy-OPM (p=[2,3])@r=4": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 4,
+"train": 0.0408374297878111,
+"test": 0.040758441871369414,
+"n_active": 30,
+"secs": 1.25
+},
+"POD@r=5": {
+"method": "POD",
+"r": 5,
+"train": 0.7530433139447859,
+"test": 0.7528272015177427,
+"n_active": -1,
+"secs": 0.14
+},
+"Greedy-QM@r=5": {
+"method": "Greedy-QM",
+"r": 5,
+"train": 0.3723549079032489,
+"test": 0.37172248947158637,
+"n_active": -1,
+"secs": 1.2
+},
+"Geelen-QM@r=5": {
+"method": "Geelen-QM",
+"r": 5,
+"train": 0.38464266305963163,
+"test": 0.3843688367698263,
+"n_active": 15,
+"secs": 0.51
+},
+"Greedy-Fixed-OPM (p=2)@r=5": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 5,
+"train": 0.20412018478003383,
+"test": 0.20395486917154462,
+"n_active": 15,
+"secs": 0.76
+},
+"Greedy-OPM (p=2)@r=5": {
+"method": "Greedy-OPM (p=2)",
+"r": 5,
+"train": 0.20412018478003635,
+"test": 0.20395486917154662,
+"n_active": 15,
+"secs": 0.8
+},
+"Greedy-OPM (p=[2,3])@r=5": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 5,
+"train": 0.0009864147927930293,
+"test": 0.0009852204915030752,
+"n_active": 48,
+"secs": 1.67
+},
+"POD@r=6": {
+"method": "POD",
+"r": 6,
+"train": 0.702983434446781,
+"test": 0.702729154692095,
+"n_active": -1,
+"secs": 0.14
+},
+"Greedy-QM@r=6": {
+"method": "Greedy-QM",
+"r": 6,
+"train": 0.2172488954681173,
+"test": 0.21645781230546715,
+"n_active": -1,
+"secs": 1.41
+},
+"Geelen-QM@r=6": {
+"method": "Geelen-QM",
+"r": 6,
+"train": 0.29215881985603015,
+"test": 0.29194059273003636,
+"n_active": 17,
+"secs": 0.69
+},
+"Greedy-Fixed-OPM (p=2)@r=6": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 6,
+"train": 0.10003197354311287,
+"test": 0.09990367055166262,
+"n_active": 21,
+"secs": 0.85
+},
+"Greedy-OPM (p=2)@r=6": {
+"method": "Greedy-OPM (p=2)",
+"r": 6,
+"train": 0.10003197354311381,
+"test": 0.09990367055166156,
+"n_active": 21,
+"secs": 0.97
+},
+"Greedy-OPM (p=[2,3])@r=6": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 6,
+"train": 0.00032881956185953025,
+"test": 0.00032835042663179325,
+"n_active": 54,
+"secs": 1.9
+},
+"POD@r=7": {
+"method": "POD",
+"r": 7,
+"train": 0.653848349891623,
+"test": 0.6535609788570271,
+"n_active": -1,
+"secs": 0.16
+},
+"Greedy-QM@r=7": {
+"method": "Greedy-QM",
+"r": 7,
+"train": 0.09772145138725939,
+"test": 0.09722185045944097,
+"n_active": -1,
+"secs": 1.82
+},
+"Geelen-QM@r=7": {
+"method": "Geelen-QM",
+"r": 7,
+"train": 0.23443851998151483,
+"test": 0.23431091891706735,
+"n_active": 20,
+"secs": 0.65
+},
+"Greedy-Fixed-OPM (p=2)@r=7": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 7,
+"train": 0.025147494997937378,
+"test": 0.025096556731438076,
+"n_active": 28,
+"secs": 0.87
+},
+"Greedy-OPM (p=2)@r=7": {
+"method": "Greedy-OPM (p=2)",
+"r": 7,
+"train": 0.025147494997984413,
+"test": 0.025096556731272278,
+"n_active": 28,
+"secs": 1.06
+},
+"Greedy-OPM (p=[2,3])@r=7": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 7,
+"train": 0.00011113337929185149,
+"test": 0.00011027561823784465,
+"n_active": 63,
+"secs": 2.17
+},
+"POD@r=8": {
+"method": "POD",
+"r": 8,
+"train": 0.605416988072715,
+"test": 0.6051004524139041,
+"n_active": -1,
+"secs": 0.15
+},
+"Greedy-QM@r=8": {
+"method": "Greedy-QM",
+"r": 8,
+"train": 0.033498093880777284,
+"test": 0.03346255989275953,
+"n_active": -1,
+"secs": 2.47
+},
+"Geelen-QM@r=8": {
+"method": "Geelen-QM",
+"r": 8,
+"train": 0.15662813495275016,
+"test": 0.15662039133143013,
+"n_active": 24,
+"secs": 0.72
+},
+"Greedy-Fixed-OPM (p=2)@r=8": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 8,
+"train": 0.006071984999233491,
+"test": 0.006071656019231197,
+"n_active": 36,
+"secs": 0.96
+},
+"Greedy-OPM (p=2)@r=8": {
+"method": "Greedy-OPM (p=2)",
+"r": 8,
+"train": 0.006071984999092702,
+"test": 0.006071656019448568,
+"n_active": 36,
+"secs": 1.22
+},
+"Greedy-OPM (p=[2,3])@r=8": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 8,
+"train": 8.489981841645535e-05,
+"test": 8.50251234769524e-05,
+"n_active": 62,
+"secs": 2.91
+},
+"POD@r=9": {
+"method": "POD",
+"r": 9,
+"train": 0.5585732035772931,
+"test": 0.5582343115903831,
+"n_active": -1,
+"secs": 0.22
+},
+"Greedy-QM@r=9": {
+"method": "Greedy-QM",
+"r": 9,
+"train": 0.006988807517545889,
+"test": 0.0069799131055393576,
+"n_active": -1,
+"secs": 3.44
+},
+"Geelen-QM@r=9": {
+"method": "Geelen-QM",
+"r": 9,
+"train": 0.12126384990465658,
+"test": 0.12111606018351485,
+"n_active": 31,
+"secs": 0.77
+},
+"Greedy-Fixed-OPM (p=2)@r=9": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 9,
+"train": 0.0009464618499465326,
+"test": 0.0009444393787210768,
+"n_active": 45,
+"secs": 1.06
+},
+"Greedy-OPM (p=2)@r=9": {
+"method": "Greedy-OPM (p=2)",
+"r": 9,
+"train": 0.0009708158410006177,
+"test": 0.0009685954074235206,
+"n_active": 44,
+"secs": 1.68
+},
+"Greedy-OPM (p=[2,3])@r=9": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 9,
+"train": 4.093299283239162e-05,
+"test": 4.0421344225076176e-05,
+"n_active": 65,
+"secs": 4.33
+},
+"POD@r=10": {
+"method": "POD",
+"r": 10,
+"train": 0.5130019435081478,
+"test": 0.5126456217884303,
+"n_active": -1,
+"secs": 0.15
+},
+"Greedy-QM@r=10": {
+"method": "Greedy-QM",
+"r": 10,
+"train": 0.0006371653186694218,
+"test": 0.0006347893697939408,
+"n_active": -1,
+"secs": 4.52
+},
+"Geelen-QM@r=10": {
+"method": "Geelen-QM",
+"r": 10,
+"train": 0.07706946886810487,
+"test": 0.07702550719640357,
+"n_active": 34,
+"secs": 0.82
+},
+"Greedy-Fixed-OPM (p=2)@r=10": {
+"method": "Greedy-Fixed-OPM (p=2)",
+"r": 10,
+"train": 8.06176631803854e-05,
+"test": 8.031341617896182e-05,
+"n_active": 55,
+"secs": 1.15
+},
+"Greedy-OPM (p=2)@r=10": {
+"method": "Greedy-OPM (p=2)",
+"r": 10,
+"train": 0.00023802663805535704,
+"test": 0.00023769922157140997,
+"n_active": 50,
+"secs": 1.53
+},
+"Greedy-OPM (p=[2,3])@r=10": {
+"method": "Greedy-OPM (p=[2,3])",
+"r": 10,
+"train": 3.278483029273811e-05,
+"test": 3.280113561624642e-05,
+"n_active": 67,
+"secs": 6.13
+}
+}
