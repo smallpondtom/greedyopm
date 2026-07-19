@@ -1,21 +1,20 @@
 """Transient Navier-Stokes (Karman vortex, Re=30) comparison -- FULL data.
 
-Identical experiment to ``nse_compare.py`` but every method is fit directly on
-the full ``d = 41682``-dimensional velocity snapshots, with NO method-of-snapshots
-POD compression (see ``prep_nse.py`` / ``DATA_PREPARATION.md`` for the compressed
-pipeline).  This is the expensive baseline: because the compared methods are
-isometry-invariant, the reported errors match the compressed run to the POD
-truncation tolerance -- only the *runtime* differs.
+Identical experiment to ``nse_compare.py`` (same temporal 70/15/15 split,
+same method settings and validation tuning), but every method is fit
+directly on the full ``d = 41682``-dimensional velocity snapshots, with NO
+method-of-snapshots POD compression.  Because the compared methods are
+isometry-invariant, the reported errors match the compressed run up to the
+POD truncation tolerance -- but the runtimes are the honest full-state
+costs, and the reported errors carry no truncation floor.
 
-Even columns = train, odd = test (same split as the compressed run, using the
-*training* mean for centering).  The reported errors are
+The reported errors are
 
-    full-state :  ||V - V_hat||_F / ||V - s_ref||_F      (no POD floor -- nothing
-                  is discarded, so there is no out-of-span residual to fold in)
+    full-state :  ||V - V_hat||_F / ||V - s_ref||_F
     output     :  ||Y - C V_hat||_F / ||Y||_F ,  Y = C V .
 
-Outputs are written with a ``_full`` suffix so they sit next to the compressed
-run without clobbering it:
+Outputs are written with a ``_full`` suffix so they sit next to the
+compressed run without clobbering it:
 
     plots/nse_compare_results_full.json          (resumable checkpoint)
     plots/nse_state_error_vs_r_full.{png,pdf}
@@ -23,8 +22,8 @@ run without clobbering it:
     plots/nse_active_features_full.{png,pdf}
     plots/nse_output_timeseries_full.{png,pdf}
 
-Phases:  sweep | curves | active | timeseries | all   (sweep is resumable; set
-NSE_FULL_BUDGET to a wall-clock budget in seconds to pause/resume across runs).
+Phases:  sweep | curves | active | timeseries | all   (sweep is resumable;
+set NSE_FULL_BUDGET to a wall-clock budget in seconds to pause/resume).
 """
 
 from __future__ import annotations
@@ -48,8 +47,10 @@ sys.path.insert(0, str(_HERE.parent))                              # experiments
 DATA_DIR = _HERE / "data"
 from exp_methods import (build_model, METHOD_NAMES, METHOD_STYLES,  # noqa: E402
                          fit_opm_tuned, _OPM_METHODS, _OPM_DEGREES,
-                         _active_by_degree)
-from exp_plots import (error_vs_r, gamma_sp_study,                 # noqa: E402
+                         _active_by_degree, _fit_opm_base, _grid_curves,
+                         _grid_curves_budget, _apply_budget_config,
+                         _select_config, _select_variant, _apply_opm_params)
+from exp_plots import (error_vs_r,                                 # noqa: E402
                        active_features_table, active_features_bar)
 from exp_split import split_indices                                # noqa: E402
 
@@ -60,6 +61,7 @@ CKPT = PLOTS / "nse_compare_results_full.json"
 R_MAX = 10
 R_OUT = 10               # r used for the y(t) timeseries (matches runme rv=10)
 RS = list(range(1, R_MAX + 1))
+# Same settings as the data-efficient (compressed) script nse_compare.py.
 CFG = dict(
     s_pool=100,
     gamma_qm=1e-12,
@@ -68,50 +70,65 @@ CFG = dict(
     geelen_rel=0.10,
     geelen_iters=400,
     tau=1e-3,
-    gamma_sp_points=24,    # gamma_sp grid resolution for the validation sweep
-    gamma_sp_tol=0.02,     # accept sparsest gamma_sp within 2% of best val error
+    gamma_sp_points=24,   # gamma_sp grid resolution for the validation sweep
+    gamma_sp_tol=0.02,    # config band: fewest features within 2% of best val
+    n_mu=14,              # mu grid resolution
+    grad_dilation=0.1,    # OOD collar for the Dirichlet / certificate probes
+    budget=1e3,        # per-experiment Lipschitz budget L (from budget_study)
+    gamma_factors=(0.01, 0.1, 0.3, 1.0, 3.0, 10.0),  # ridge grid, multiples of n
 )
-# Full-data fits are expensive; default to "no budget" (run to completion in one
-# call), but allow a finite wall-clock budget for resumable runs.
-TIME_BUDGET = float(os.environ.get("NSE_FULL_BUDGET", "1e9"))
+# Full-data fits are expensive; allow a finite wall-clock budget so the sweep
+# can pause/resume across sandbox calls.
+TIME_BUDGET = float(os.environ.get("NSE_FULL_BUDGET", "30"))
 
 
 def load():
-    """Load the raw snapshots and derive the train/val/test split + outputs.
+    """Raw snapshots + temporal 70/15/15 split (same as nse/prep_nse.py).
 
-    Fixed-seed random 50/25/25 split; the validation set tunes the Greedy-OPM
-    gamma_sp and the test set is held out for the reported errors.  All splits
-    are centered with the *training* mean.  The full time-ordered trajectory is
-    also returned (for the y(t) timeseries plot).
+    The 70% training fraction reaches the saturated vortex-shedding limit
+    cycle; validation (near future) tunes the Greedy-OPM hyperparameters and
+    the final 15% (far future) is the held-out test window.
     """
     d = np.load(RAW)
-    V = d["V"].astype(np.float64)            # (d, 2000)
+    V = d["V"]                               # (d, 2000), float64 on disk
+    if V.dtype != np.float64:
+        V = V.astype(np.float64)
     trange = np.asarray(d["trange"])
     C = d["C"].astype(np.float64)            # (6, d)
-    itr, iva, ite = split_indices(V.shape[1])
-    V_tr, V_va, V_te = V[:, itr], V[:, iva], V[:, ite]
+    itr, iva, ite = split_indices(V.shape[1], train_frac=0.7, val_frac=0.15)
     t_tr, t_va, t_te = trange[itr], trange[iva], trange[ite]
-    s_ref = V_tr.mean(axis=1, keepdims=True)             # training mean
-    nrm_tr = float(np.linalg.norm(V_tr - s_ref))         # centered training norm
-    nrm_va = float(np.linalg.norm(V_va - s_ref))         # centered validation norm
-    nrm_te = float(np.linalg.norm(V_te - s_ref))         # centered test norm
-    Y_tr = C @ V_tr                                      # (6, ntr)
-    Y_va = C @ V_va                                      # (6, nva)
-    Y_te = C @ V_te                                      # (6, nte)
-    return dict(V_tr=V_tr, V_va=V_va, V_te=V_te,
-                Y_tr=Y_tr, Y_va=Y_va, Y_te=Y_te,
-                t_tr=t_tr, t_va=t_va, t_te=t_te,
-                nrm_tr=nrm_tr, nrm_va=nrm_va, nrm_te=nrm_te,
-                V_all=V, Y_all=C @ V, t_all=trange, idx_test=ite,
-                C=C, d=int(V.shape[0]))
+    Y = C @ V                                # (6, 2000), cheap
+    # The temporal split blocks are contiguous: slice by VIEW and copy each
+    # block straight to the device -- exactly ONE copy of each split lives in
+    # memory (the sandbox has ~3 GB of RAM; the raw matrix is 0.67 GB).
+    sl = {k: slice(int(idx[0]), int(idx[-1]) + 1)
+          for k, idx in (("tr", itr), ("va", iva), ("te", ite))}
+    out = dict(t_tr=t_tr, t_va=t_va, t_te=t_te, C=C, d=int(V.shape[0]),
+               Y_tr=Y[:, itr], Y_va=Y[:, iva], Y_te=Y[:, ite])
+    s_ref = None
+    nrm = {}
+    for key in ("tr", "va", "te"):
+        blk = jnp.asarray(V[:, sl[key]])
+        if s_ref is None:                    # training mean, from the block
+            s_ref = jnp.mean(blk, axis=1, keepdims=True)
+        nrm[key] = float(jnp.linalg.norm(blk - s_ref))
+        out[f"V_{key}"] = blk
+    del V, d
+    out["nrm"] = dict(train=nrm["tr"], val=nrm["va"], test=nrm["te"])
+    return out
 
 
 def _metrics(model, S, Y, nrm, C):
-    """Full-state + sensor-output relative errors on the raw d-dim snapshots."""
-    Sh = np.asarray(model.reconstruct(jnp.asarray(S)))   # (d, n)
-    state_rel = float(np.linalg.norm(np.asarray(S) - Sh) / nrm)   # no POD floor
-    y = C @ Sh                                           # (6, n)
-    out_rel = float(np.linalg.norm(Y - y) / np.linalg.norm(Y))
+    """Full-state + sensor-output relative errors on the raw d-dim snapshots.
+
+    ``S`` is a device array; the reconstruction is consumed on device to
+    avoid a second host copy (memory-constrained sandbox).
+    """
+    Sh = model.reconstruct(S)                            # (d, n), device
+    state_rel = float(jnp.linalg.norm(S - Sh) / nrm)     # no POD floor
+    y = jnp.asarray(C) @ Sh                              # (6, n)
+    out_rel = float(jnp.linalg.norm(jnp.asarray(Y) - y)
+                    / np.linalg.norm(Y))
     return state_rel, out_rel
 
 
@@ -125,11 +142,9 @@ def _n_active(model):
 def _block(model):
     """Force JAX to finish the fit before stopping the timer.
 
-    JAX dispatches asynchronously, so a purely lazy fit (notably POD: mean ->
-    SVD -> slice, with no host-side data dependency) returns before the SVD has
-    actually run, and its cost would otherwise be mis-attributed to the later
-    metrics step.  Blocking on the fitted arrays makes ``fit_secs`` honest for
-    every method.
+    JAX dispatches asynchronously, so a purely lazy fit (notably POD) would
+    otherwise return before the SVD has actually run and its cost would be
+    mis-attributed to the later metrics step.
     """
     arrs = [v for v in vars(model).values() if isinstance(v, jnp.ndarray)]
     if arrs:
@@ -137,14 +152,94 @@ def _block(model):
     return model
 
 
+SVD_CACHE = DATA_DIR / "nse_full_svd_cache.npz"
+SVD_CACHE_FIT = DATA_DIR / "nse_full_svd_trainval_cache.npz"
+
+
+def _shared_svd(V_blk, cache):
+    """Memory-lean rank-s_pool SVD (method of snapshots), cached to disk.
+
+    Never forms a d x n factor: eigendecompose the (n x n) Gram matrix and
+    lift only the leading s_pool modes, ``U_s = X W_s / sigma_s``.  Cached so
+    resumed sweep calls skip the recomputation.
+    """
+    if cache.exists():
+        z = np.load(cache)
+        return z["U_s"], z["sigma"], z["W_s"]
+    X = V_blk - jnp.mean(V_blk, axis=1, keepdims=True)
+    G = np.asarray(X.T @ X)                      # (n, n)
+    w, W = np.linalg.eigh(G)
+    w = np.clip(w[::-1], 0.0, None); W = np.ascontiguousarray(W[:, ::-1])
+    k = int(CFG["s_pool"])
+    sigma = np.sqrt(w[:k]); W_s = W[:, :k]
+    U_s = np.asarray(X @ jnp.asarray(W_s / sigma[None, :]))   # (d, k)
+    np.savez(cache, U_s=U_s, sigma=sigma, W_s=W_s)
+    return U_s, sigma, W_s
+
+
+def _staged_opm(key, res, V_tr, V_va, r, degrees):
+    """Validation-tuned OPM fit, STAGED across sandbox calls.
+
+    The two mode-selection variants are tuned in separate stages whose
+    (JSON-serializable) results are checkpointed under ``__stage:`` keys, so
+    each call needs to fit at most one greedy variant; the final call refits
+    the selected variant and returns the model.  Mirrors
+    ``exp_methods.fit_opm_tuned`` exactly.
+    """
+    exact = CFG.get("exact_polish", False)
+    n_points = CFG.get("gamma_sp_points", 24)
+    tol = CFG.get("gamma_sp_tol", 0.02)
+    stages = {}
+    stage_secs = 0.0
+    for sel, s_pool in (("greedy", None), ("leading", r)):
+        skey = f"__stage:{key}:{sel}"
+        if skey not in res:
+            tic = time.time()
+            m = _fit_opm_base(V_tr, r, degrees, CFG, s_pool=s_pool)
+            L = CFG.get("budget")
+            if L is not None:
+                curves = _grid_curves_budget(m, V_tr, V_va, CFG, n_points,
+                                             sel, float(L))
+            else:
+                curves = _grid_curves(m, V_tr, V_va, CFG, n_points, exact,
+                                      sel)
+            best = _select_config(curves, tol)
+            if L is not None:                 # budget mode: mu varies per point
+                curve = next(c for c in curves
+                             if c and c[0].get("gamma") == best.get("gamma"))
+            else:
+                curve = next(c for c in curves
+                             if c and c[0]["mu"] == best["mu"]
+                             and c[0].get("gamma") == best.get("gamma"))
+            res[skey] = dict(best=best, curve=curve,
+                             secs=round(time.time() - tic, 3))
+            _save(res)
+            del m
+            return None                      # one heavy stage per call
+        stage_secs += float(res[skey].get("secs", 0.0))
+        stages[sel] = (None, res[skey]["curve"], res[skey]["best"])
+
+    best_sel = _select_variant(stages, CFG.get("variant_tol", tol))
+    _, curve, best = stages[best_sel]
+    m = _fit_opm_base(V_tr, r, degrees, CFG,
+                      s_pool=(r if best_sel == "leading" else None))
+    L = CFG.get("budget")
+    if L is not None:
+        _apply_budget_config(m, best, float(L))
+    else:
+        _apply_opm_params(m, best["gamma_sp"], best["mu"], exact,
+                          gamma=best.get("gamma"))
+    for sel in ("greedy", "leading"):
+        res.pop(f"__stage:{key}:{sel}", None)
+    return (m, best["gamma_sp"], best["mu"], curve, best_sel,
+            best.get("gamma"), stage_secs)
+
+
 def run_sweep(D, budget=TIME_BUDGET):
     res = json.load(open(CKPT)) if CKPT.exists() else {}
-    V_tr, V_va, V_te = D["V_tr"], D["V_va"], D["V_te"]
-    Y_tr, Y_va, Y_te = D["Y_tr"], D["Y_va"], D["Y_te"]
     C = D["C"]
-    ntr, nva, nte = D["nrm_tr"], D["nrm_va"], D["nrm_te"]
-    V_tr_j = jnp.asarray(V_tr)                  # device once (not per-fit)
-    V_va_j = jnp.asarray(V_va)
+    V_tr_j, V_va_j = D["V_tr"], D["V_va"]       # already device arrays
+    CFG["_svd"] = _shared_svd(V_tr_j, SVD_CACHE)             # all OPM fits
     t0 = time.time(); did = False
     for r in RS:
         for nm in METHOD_NAMES:
@@ -155,33 +250,48 @@ def run_sweep(D, budget=TIME_BUDGET):
                 _save(res); print("[budget] pausing; rerun to continue"); return res, False
             tic = time.time()
             if nm in _OPM_METHODS:
-                # Fit once, tune gamma_sp on the validation split (full-state
-                # reconstruction error), then prune to the selected value.
-                model, gsp, curve = fit_opm_tuned(
-                    V_tr_j, V_va_j, r, _OPM_DEGREES[nm], CFG)
+                out = _staged_opm(key, res, V_tr_j, V_va_j, r,
+                                  _OPM_DEGREES[nm])
+                if out is None:               # stage checkpointed; next call
+                    print(f"  r={r:2d} {nm:24s} [staged; rerun to continue]")
+                    did = True
+                    continue
+                model, gsp, mu, curve, sel, gam, stage_secs = out
                 _block(model)
+                tic -= stage_secs             # include the staged tuning time
             else:
                 model = _block(build_model(nm, V_tr_j, r, CFG))
-                gsp, curve = None, None
+                gsp, mu, curve, sel, gam = None, None, None, None, None
             fit_secs = round(time.time() - tic, 3)     # fit + tuning wall time
-            s_tr, o_tr = _metrics(model, V_tr, Y_tr, ntr, C)
-            s_va, o_va = _metrics(model, V_va, Y_va, nva, C)
-            s_te, o_te = _metrics(model, V_te, Y_te, nte, C)
+            s_tr, o_tr = _metrics(model, D["V_tr"], D["Y_tr"], D["nrm"]["train"], C)
+            s_va, o_va = _metrics(model, D["V_va"], D["Y_va"], D["nrm"]["val"], C)
+            s_te, o_te = _metrics(model, D["V_te"], D["Y_te"], D["nrm"]["test"], C)
+            n_act = _n_active(model)
+            act_by_deg = _active_by_degree(model)
+            cert_val = getattr(model, "certificate_", None)
+            del model                                   # free d-dim arrays
             res[key] = dict(method=nm, r=int(r),
                             state_train=s_tr, state_val=s_va, state_test=s_te,
                             out_train=o_tr, out_val=o_va, out_test=o_te,
-                            n_active=_n_active(model),
-                            n_active_by_degree=_active_by_degree(model),
+                            n_active=n_act,
+                            n_active_by_degree=act_by_deg,
                             gamma_sp=(None if gsp is None else float(gsp)),
+                            mu=(None if mu is None else float(mu)),
+                            gamma=(None if gam is None else float(gam)),
+                            cert=(None if cert_val is None
+                                  else float(cert_val)),
+                            sel=sel,
                             gamma_sp_curve=curve,
                             fit_secs=fit_secs,
                             secs=round(time.time() - tic, 2))
             did = True
-            gtxt = f" gsp={gsp:.2e}" if gsp is not None else ""
+            gtxt = f" gsp={gsp:.2e} mu={mu:.2e} sel={sel}" if gsp is not None else ""
             print(f"  r={r:2d} {nm:24s} state(te)={s_te:.3e} out(te)={o_te:.3e} "
                   f"act={res[key]['n_active']:>3d}{gtxt} ({res[key]['secs']}s)")
             _save(res)
-    _save(res); return res, True
+    _save(res)
+    done = all(f"{nm}@r={r}" in res for r in RS for nm in METHOD_NAMES)
+    return res, done
 
 
 def _save(res):
@@ -190,40 +300,45 @@ def _save(res):
 
 
 def timeseries(D, res):
-    """y(t) = C x for each method vs ground truth over the full trajectory.
-
-    Models are fit on the random train subset; here they reconstruct the FULL
-    time-ordered trajectory (so the curves are coherent in time) and the
-    held-out test snapshots are marked with dots.  Greedy-OPM models use their
-    validation-tuned gamma_sp (read from the checkpoint)."""
-    V_tr = jnp.asarray(D["V_tr"])
+    """y(t) = C x for each method vs ground truth over the full horizon."""
     C = D["C"]
-    t = np.asarray(D["t_all"])
-    order = np.argsort(t)                                 # ensure time order
-    tfull = t[order]
-    Vfull = jnp.asarray(D["V_all"][:, order])
-    Ytrue = np.asarray(D["Y_all"])[:, order]
-    test_pt = np.isin(order, np.asarray(D["idx_test"]))   # test cols, in t-order
+    V = {k: D[f"V_{k}"] for k in ("tr", "va", "te")}
+    order = ("tr", "va", "te")
+    tfull = np.concatenate([D[f"t_{k}"] for k in order])
+    Ytrue = np.concatenate([D[f"Y_{k}"] for k in order], axis=1)
     n_out = Ytrue.shape[0]
 
-    ymethods = {}
+    CFG["_svd"] = _shared_svd(V["tr"], SVD_CACHE)     # all OPM fits
+    # Per-method y(t) cache so the phase is resumable under the 45s limit.
+    ycache = PLOTS / "nse_timeseries_cache_full.npz"
+    ymethods = dict(np.load(ycache)) if ycache.exists() else {}
     for nm in METHOD_NAMES:
-        gsp = (res.get(f"{nm}@r={R_OUT}") or {}).get("gamma_sp")
-        model = build_model(nm, V_tr, R_OUT, CFG, gamma_sp=gsp)
-        ymethods[nm] = C @ np.asarray(model.reconstruct(Vfull))
+        if nm in ymethods:
+            continue
+        entry = res.get(f"{nm}@r={R_OUT}") or {}
+        model = build_model(nm, V["tr"], R_OUT, CFG,
+                            gamma_sp=entry.get("gamma_sp"),
+                            mu=entry.get("mu"),
+                            sel=entry.get("sel") or "greedy",
+                            gamma=entry.get("gamma"))
+        yy = [C @ np.asarray(model.reconstruct(V[k])) for k in order]
+        ymethods[nm] = np.concatenate(yy, axis=1)
+        np.savez(ycache, **ymethods)
+        print(f"    cached y(t) for {nm}")
 
     fig, axes = plt.subplots(3, 2, figsize=(18, 11), sharex=True)
     axes = axes.ravel()
+    t_train_end, t_val_end = D["t_tr"][-1], D["t_va"][-1]
     for i in range(n_out):
         ax = axes[i]
         ax.plot(tfull, Ytrue[i], color="k", lw=2.4, label="Ground truth", zorder=10)
-        ax.scatter(tfull[test_pt], Ytrue[i][test_pt], s=10, color="k",
-                   alpha=0.55, zorder=11, label="test snapshots")
         for nm in METHOD_NAMES:
             st = METHOD_STYLES[nm]
             ls = "--" if "--" in st["fmt"] else "-"
             ax.plot(tfull, ymethods[nm][i], ls, color=st["color"],
                     lw=1.4, alpha=0.9, label=nm)
+        for tv in (t_train_end, t_val_end):
+            ax.axvline(tv, color="gray", lw=1.0, ls=":", zorder=5)
         ax.set_title(f"sensor output $y_{i+1}(t)$", fontsize=14)
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=11)
@@ -232,9 +347,9 @@ def timeseries(D, res):
     h, l = axes[0].get_legend_handles_labels()
     fig.legend(h, l, loc="lower center", ncol=4, fontsize=13,
                bbox_to_anchor=(0.5, -0.04), frameon=False)
-    fig.suptitle(f"Karman vortex (full data) — sensor outputs $y(t)=Cx$  (r={R_OUT}, "
-                 f"full trajectory; model trained on random 50%, dots = held-out "
-                 f"test snapshots)", fontsize=18, y=1.0)
+    fig.suptitle("Karman vortex (full data) — sensor outputs $y(t)=Cx$  "
+                 f"(r={R_OUT}; dotted lines mark the train/val/test windows)",
+                 fontsize=18, y=1.0)
     plt.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(str(PLOTS / f"nse_output_timeseries_full.{ext}"), dpi=160,
@@ -264,10 +379,6 @@ def main(phase="all"):
                    "Karman vortex (full data) — full-state reconstruction error vs reduced dimension")
         error_vs_r(res_out, RS, METHOD_NAMES, str(PLOTS / "nse_output_error_vs_r_full"),
                    "Karman vortex (full data) — sensor-output error $\\|y-\\hat y\\|/\\|y\\|$ vs reduced dimension")
-    if phase in ("all", "study"):
-        gamma_sp_study(res, RS, METHOD_NAMES,
-                       str(PLOTS / "nse_gamma_sp_study_full"),
-                       "Karman vortex (full data) — gamma_sp validation study")
     if phase in ("all", "active"):
         print("\n[nse-full] number of active nonlinear features:")
         active_features_table(res, RS, METHOD_NAMES)

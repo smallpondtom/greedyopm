@@ -43,18 +43,26 @@ MESH = DATA_DIR / "mesh" / "karman2D-outlets_lvl1.xml.gz"
 PLOTS = _HERE / "plots"
 
 METHOD = "Greedy-OPM (p=[2,3])"
-SNAP_INDEX = 1600          # global snapshot index (even -> train); t ~ 9.6
+SNAP_INDEX = 1850          # global snapshot index in the TEST window; t ~ 11.1
 R_FIELD = 10
 GRID_NX = 1100
 CMAP = "viridis"
+# Same settings as nse_compare_full.py / nse_compare.py; the tuned
+# (gamma_sp, mu, gamma, sel) for the plotted method are read from the
+# full-data checkpoint.
+CKPT = _HERE / "plots" / "nse_compare_results_full.json"
 CFG = dict(
-    s_pool=100, 
-    gamma_qm=1e-12, 
-    gamma_opm=1e-12, 
+    s_pool=100,
+    gamma_qm=1e-12,
+    gamma_opm=1e-12,
     gamma_geelen=1e-8,
-    geelen_rel=0.10, 
-    geelen_iters=400, 
-    tau=1e-3
+    geelen_rel=0.10,
+    geelen_iters=400,
+    tau=1e-3,
+    gamma_sp_points=24,
+    gamma_sp_tol=0.02,
+    n_mu=14,
+    grad_dilation=0.1,
 )
 
 
@@ -121,7 +129,15 @@ def main(method=METHOD, g=SNAP_INDEX, r=R_FIELD):
           f"{len(tris)} triangles, extent {extent}")
 
     # ---- lossless training POD basis (method of snapshots), matches prep_nse
-    Vtr = V[:, ::2]
+    # Temporal split: first 70% of the snapshots train the models (see
+    # exp_split.py / prep_nse.py); the plotted snapshot is in the held-out
+    # far-future test window.
+    from exp_split import split_indices
+    itr, iva, ite = split_indices(V.shape[1], train_frac=0.7, val_frac=0.15)
+    print(f"[field] temporal split: train {len(itr)} / val {len(iva)} / "
+          f"test {len(ite)}; snapshot {g} is in "
+          f"{'TEST' if g in set(ite.tolist()) else ('VAL' if g in set(iva.tolist()) else 'TRAIN')}")
+    Vtr = V[:, itr]
     s_ref = Vtr.mean(axis=1, keepdims=True)
     Xtr = Vtr - s_ref
     w, W = np.linalg.eigh(Xtr.T @ Xtr)
@@ -135,8 +151,18 @@ def main(method=METHOD, g=SNAP_INDEX, r=R_FIELD):
     # ---- reduced coordinate of snapshot g and Greedy-OPM reconstruction
     truth_int = V[:, g]
     a_col = Q.T @ (truth_int - s_ref[:, 0])                # (K,)
-    print(f"[field] building {method} at r={r} ...")
-    model = build_model(method, jnp.asarray(A_train), r, CFG)
+    import json
+    entry = {}
+    if CKPT.exists():
+        entry = (json.load(open(CKPT)).get(f"{method}@r={r}") or {})
+    print(f"[field] building {method} at r={r} "
+          f"(gsp={entry.get('gamma_sp')}, mu={entry.get('mu')}, "
+          f"sel={entry.get('sel')}) ...")
+    model = build_model(method, jnp.asarray(A_train), r, CFG,
+                        gamma_sp=entry.get("gamma_sp"),
+                        mu=entry.get("mu"),
+                        sel=entry.get("sel") or "greedy",
+                        gamma=entry.get("gamma"))
     ahat = np.asarray(model.reconstruct(jnp.asarray(a_col[:, None])))[:, 0]
     rec_int = s_ref[:, 0] + Q @ ahat
 
@@ -169,7 +195,8 @@ def main(method=METHOD, g=SNAP_INDEX, r=R_FIELD):
     panel(axes[2], err_v, "RdBu_r", err_lv,
           "Error  $|\\hat u| - |u|$")
     fig.suptitle(f"Karman vortex — Greedy-OPM velocity-magnitude reconstruction "
-                 f"(t={trange[g]:.2f}, rel.err={rel:.2e})", fontsize=16, y=1.0)
+                 f"(held-out test snapshot, t={trange[g]:.2f}, "
+                 f"rel.err={rel:.2e})", fontsize=16, y=1.0)
     plt.tight_layout()
     PLOTS.mkdir(parents=True, exist_ok=True)
     out = PLOTS / "nse_greedyopm_field"

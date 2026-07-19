@@ -175,21 +175,56 @@ class TestStabilityRegularizedGreedy:
         # the stabilized manifold must not be (much) worse OOD
         assert err_stab <= max(2.0 * err_plain, 1.5)
 
-    def test_stability_aware_activation_subset(self, data):
-        """Weighted rule activates a subset of the plain rule (same basis)."""
-        m = GreedyOPM(
-            r=4, s=12, p=3, mu=1e-2, gamma_sp=1e-3, grad_dilation=0.1,
-        ).fit(data)
-        act_plain = set(np.asarray(m.active_nl_global_).tolist())
-        # toggle on the SAME fitted model: identical basis, re-threshold only
-        m.stability_aware_activation = True
-        m.set_sparsity(m.gamma_sp)
-        act_weighted = set(np.asarray(m.active_nl_global_).tolist())
-        assert act_weighted <= act_plain
+    def test_enforce_budget(self, data):
+        """The certificate loop drives L_hat below any budget L > 1."""
+        m = GreedyOPM(r=4, s=12, p=3, mu=0.0, gamma_sp=1e-4).fit(data)
+        cert0 = m.lipschitz_certificate(dilation=0.2)
+        L = 1.0 + 0.5 * (cert0 - 1.0)  # a budget strictly below the initial
+        cert = m.enforce_budget(L, dilation=0.2)
+        assert cert <= L
+        assert m.mu > 0.0
+        # active set is mu-independent (one-step theorem)
+        m2 = GreedyOPM(r=4, s=12, p=3, mu=0.0, gamma_sp=1e-4).fit(data)
+        assert set(np.asarray(m.active_nl_global_).tolist()) == set(
+            np.asarray(m2.active_nl_global_).tolist()
+        )
 
-    def test_stability_aware_activation_warns_without_mu(self):
-        with pytest.warns(UserWarning, match="stability_aware_activation"):
-            GreedyOPM(r=2, s=6, p=2, mu=0.0, stability_aware_activation=True)
+    def test_enforce_budget_rejects_trivial(self, data):
+        m = GreedyOPM(r=3, s=10, p=2).fit(data)
+        with pytest.raises(ValueError):
+            m.enforce_budget(1.0)
+
+    def test_fit_computes_certificate(self, data):
+        """fit() ends with the certificate of Algorithm `greedy-opm`."""
+        m = GreedyOPM(r=3, s=10, p=2, grad_dilation=0.1).fit(data)
+        assert m.certificate_ is not None and m.certificate_ >= 1.0
+        # matches the standalone evaluation at the same dilation
+        assert np.isclose(m.certificate_,
+                          m.lipschitz_certificate(dilation=0.1), rtol=1e-12)
+
+    def test_fit_enforces_budget(self, data):
+        """A budget passed to the constructor is enforced inside fit()."""
+        m0 = GreedyOPM(r=4, s=12, p=3, grad_dilation=0.1).fit(data)
+        L = 1.0 + 0.5 * (m0.certificate_ - 1.0)
+        m = GreedyOPM(r=4, s=12, p=3, grad_dilation=0.1, budget=L).fit(data)
+        assert m.certificate_ <= L
+        assert m.mu > 0.0
+
+    def test_budget_requires_valid_args(self):
+        with pytest.raises(ValueError):
+            GreedyOPM(r=2, s=6, p=2, budget=0.5)
+        with pytest.raises(ValueError):
+            GreedyOPM(r=2, s=6, p=2, budget=5.0, ortho_method="qr", mu=0.0)
+
+    def test_certificate_refreshed_by_resolves(self, data):
+        """set_sparsity / set_mu / polish_exact keep certificate_ current."""
+        m = GreedyOPM(r=3, s=10, p=2, gamma_sp=1e-4).fit(data)
+        c0 = m.certificate_
+        m.set_mu(1e3)
+        assert m.certificate_ <= c0 * (1 + 1e-9)   # surrogate shrinks columns
+        m.polish_exact(1e3)
+        assert np.isclose(m.certificate_,
+                          m.lipschitz_certificate(), rtol=1e-12)
 
     def test_probe_subsampling(self, data):
         m = GreedyOPM(r=3, s=10, p=2, mu=1.0, n_grad_samples=25).fit(data)

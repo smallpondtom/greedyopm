@@ -3,10 +3,12 @@
 Generates the 2D shallow-water height field h(x, y, t) with the faithful
 spectral solver (experiments/data/shallow_water.py) and compares POD,
 Greedy-QM, Geelen-QM, Greedy-Fixed-OPM (p=2), Greedy-OPM (p=2), and
-Greedy-OPM (p=[2,3]).  Snapshots are split by a fixed-seed random permutation
-into 50% train / 25% validation / 25% test (see experiments/exp_split.py); the
-validation set tunes the Greedy-OPM gamma_sp and the test set is held out for
-the reported errors.
+Greedy-OPM (p=[2,3]).  Snapshots are split TEMPORALLY into the first 50% of
+timesteps (train), the next 25% (validation, near future) and the final 25%
+(test, far future), so the test set is a genuine forward-in-time
+extrapolation (see experiments/exp_split.py).  The validation window tunes
+the Greedy-OPM hyperparameters (gamma_sp, mu); the test window is held out
+for the reported errors.
 
 The state modelled is the height field h (d = N^2); the dispersing concentric
 waves give a slowly decaying Kolmogorov n-width.  The r-sweep is resumable;
@@ -42,7 +44,15 @@ CKPT = PLOTS / "swe_compare_results.json"
 N = 108
 # store densely: n_train must exceed the degree-<=3 feature count (<=286 at r=10)
 # to keep the empirical polynomial basis well-posed (unisolvence: n >= #features).
-SWE_KW = dict(N=N, dt=2.0e-3, t_end=8.0, store_every=2, ic_sharpness=4.0)
+# A broad, moderate-amplitude initial bump (ic_sharpness=1.5, bump_amp=0.25)
+# excites a coherent sloshing wave field: the singular values decay slowly
+# (transport-dominated n-width barrier) yet the future windows remain
+# reconstructible from the training span, so the temporal train / val / test
+# split is genuinely out-of-distribution without being degenerate.  Horizon
+# t_end=20 lets the wavefront wrap the periodic domain ~3 times inside the
+# training window.
+SWE_KW = dict(N=N, dt=2.0e-3, t_end=20.0, store_every=5,
+              ic_sharpness=1.5, bump_amp=0.25)
 R_MAX = 10
 R_FIELD = 8
 RS = list(range(1, R_MAX + 1))
@@ -55,16 +65,26 @@ CFG = dict(
     geelen_iters=400,
     tau=1e-3,
     gamma_sp_points=24,    # gamma_sp grid resolution for the validation sweep
-    gamma_sp_tol=0.02,     # accept sparsest gamma_sp within 2% of best val error
+    gamma_sp_tol=0.005,    # config band: fewest features within 0.5% of best val
+    variant_tol=0.08,      # prefer leading modes unless greedy val-gain > 8%
+    n_mu=14,               # mu grid resolution
+    gamma_factors=(0.01, 0.1, 0.3, 1.0, 3.0, 10.0),   # ridge grid, multiples of n
+    grad_dilation=0.1,     # OOD collar for the Dirichlet / certificate probes
+    budget=3.0,        # per-experiment Lipschitz budget L (from budget_study)
 )
-TIME_BUDGET = 300.0
+TIME_BUDGET = 30.0    # per-call wall budget (sandbox 45s limit; sweep resumes)
 
 def load_height():
-    """Return height-field snapshots S_h (N*N, n_snap) and grids."""
+    """Return height-field snapshots S_h (N*N, n_snap) and times (cached)."""
+    cache = _HERE / "swe_height_cache.npz"
+    if cache.exists():
+        d = np.load(cache)
+        return d["S_h"], {"tspan": d["tspan"]}
     S, info = generate_shallow_water(**SWE_KW)
     NN = N * N
-    S_h = S[:NN, :]                       # height field only
-    return S_h, info
+    S_h = np.asarray(S[:NN, :])           # height field only
+    np.savez(cache, S_h=S_h, tspan=np.asarray(info["tspan"]))
+    return S_h, {"tspan": np.asarray(info["tspan"])}
 
 
 def main(phase="all"):
@@ -108,17 +128,20 @@ def main(phase="all"):
 
     if phase in ("all", "field"):
         ext = [-np.pi, np.pi, -np.pi, np.pi]
-        # Representative late-time snapshot within each split (waves dispersed):
-        # sort the split's columns into time order, then take the 70% one.
-        disp = {"train": np.sort(itr), "test": np.sort(ite)}
+        # Representative late-time snapshot within each (contiguous) split:
+        # take the 70% column of the window.
+        disp = {"train": itr, "test": ite}
         col = {sp: int(cols[int(0.7 * len(cols))]) for sp, cols in disp.items()}
         recon = {"train": {}, "test": {}}
         rel = {"train": {}, "test": {}}
         truth = {sp: np.asarray(S[:, c]).reshape(N, N) for sp, c in col.items()}
         for nm in METHOD_NAMES:
-            gsp = (results.get(f"{nm}@r={R_FIELD}") or {}).get("gamma_sp")
+            entry = results.get(f"{nm}@r={R_FIELD}") or {}
             model = build_model(nm, jnp.asarray(S_train), R_FIELD, CFG,
-                                gamma_sp=gsp)
+                                gamma_sp=entry.get("gamma_sp"),
+                                mu=entry.get("mu"),
+                                sel=entry.get("sel") or "greedy",
+                                gamma=entry.get("gamma"))
             for split, c in col.items():
                 truth_col = np.asarray(S[:, c])
                 approx = np.asarray(model.reconstruct(jnp.asarray(S[:, c:c + 1])))[:, 0]

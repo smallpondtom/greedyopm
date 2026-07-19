@@ -1,7 +1,10 @@
-# Greedy-OPM experiments: linear transport & shallow water 2D
+# Greedy-OPM experiments: transport, shallow water 2D, Navier-Stokes
 
-Comparison of six methods on two transport-dominated problems, with an
-even/odd snapshot split (even = train, odd = test).
+Comparison of six methods on three transport-dominated problems with a
+**temporal train / validation / test split** (`exp_split.py`): the first
+window of timesteps trains the models, the next window (near future) tunes
+the Greedy-OPM hyperparameters, and the final window (far future) is held out
+for the reported errors — a genuine forward-in-time out-of-distribution test.
 
 ## Methods
 | Label | What it is |
@@ -10,119 +13,105 @@ even/odd snapshot split (even = train, odd = test).
 | Greedy-QM | Schwerdtner–Peherstorfer greedy mode selection, quadratic monomials (`qm/quadmani.py`) |
 | Geelen-QM | leading-r POD modes + group-sparse quadratic column selection (`qm/geelen_qm.py`, FISTA) |
 | Greedy-Fixed-OPM (p=2) | greedy modes, **all** orthonormal quadratic features (`GreedyFixedOPM`) |
-| Greedy-OPM (p=2) | greedy modes **+ feature selection**, orthonormal quadratic (`GreedyOPM`) |
-| Greedy-OPM (p=[2,3]) | greedy modes + feature selection, orthonormal quadratic **+ cubic** |
+| Greedy-OPM (p=2) | greedy modes **+ feature selection + Lipschitz budget**, orthonormal quadratic (`GreedyOPM`) |
+| Greedy-OPM (p=[2,3]) | same, orthonormal quadratic **+ cubic** |
 
-## Files added
-```
-experiments/
-  exp_methods.py                     # method registry + resumable r-sweep (checkpoint + time budget)
-  exp_plots.py                       # error-vs-r curves + field/error panels
-  data/shallow_water.py             # faithful spectral SWE2d solver (h, phi)
-  qm/geelen_qm.py                   # Geelen group-sparse quadratic manifold
-  transport/transport_compare.py    # transport driver (phases: sweep|curves|field|all)
-  shallow_water/shallow_water_compare.py
-  */plots/*.png|pdf                 # outputs + checkpoint JSONs
-```
-Run (each phase < ~35s to fit the sandbox limit; sweep is resumable):
-```
-python experiments/transport/transport_compare.py sweep   # repeat until "SWEEP DONE"
-python experiments/transport/transport_compare.py curves
-python experiments/transport/transport_compare.py field
-# same for experiments/shallow_water/shallow_water_compare.py
-```
+## Budget protocol (pure Algorithm 4; `exp_methods.fit_opm_tuned`)
+One **Lipschitz budget `L` per experiment**, chosen by `budget_study.py` as
+the smallest `L` whose tuned validation error is within 2% of the best over
+all budgets: **transport `L=1e5`, SWE `L=3`, NSE `L=1e3`** (set as
+`CFG["budget"]` in each compare script). Fit once per mode-selection variant
+(`greedy` pool `s=100`; `leading` = leading-r modes), then sweep the full
+`(gamma, gamma_sp)` grid on the **validation window** in reduced space
+(closed-form re-solves; no refits). The active set is the paper's group
+soft-threshold; **`mu` is never tuned** — for each grid point it is set to
+the smallest value whose certificate satisfies `L̂_Γ(δ) ≤ L` (the fixed point
+of Algorithm 4's outer `mu`-loop, closed form from the cached per-feature
+gradient bounds; surrogate lifting throughout, no exact polish). Selection:
+minimize validation error; within `gamma_sp_tol`, prefer the best training
+error, then the fewest active features; prefer the leading-modes variant
+within `variant_tol`. Every reported model carries the certificate
+`L̂_Γ(0.1) ≤ L`.
 
 ## Problem setups
-- **Transport** — advecting Gaussian pulse, `nx=512`, `nt=800` (400 train / 400 test),
-  width `1e-3`, speed `5`, `t∈[0,0.2]`. Candidate pool `s=50`, `r=1..10`.
-- **Shallow water 2D** — faithful Fourier pseudo-spectral + RK4 solver of the documented
-  Hamiltonian SWE (height `h`, velocity potential `φ`) on periodic `[-π,π]²`, bump IC
-  `h₀ = 1 + 0.33 e^{-α(x²+y²)}`, `α=4`, `N=64`. Hamiltonian conserved to ~1e-13.
-  We model the **height field** `h` (`d = N² = 4096`); 801 snapshots (401 train / 400 test).
-  Candidate pool `s=40`, `r=1..10`.
+- **Transport** (`transport/transport_compare.py`) — periodic
+  advection–diffusion pulse (exact spectral solution), `NX=1024`, `NT=1200`,
+  `t∈[0,2]` (the pulse crosses the domain once per unit time), `nu=1e-4`.
+  Split 50/25/25: training covers one full traversal; the future pulse
+  revisits known positions with never-seen (decayed/widened) profiles.
+- **Shallow water 2D** (`shallow_water/shallow_water_compare.py`) — spectral
+  SWE2d solver, height field `h` (`d=108²=11664`), broad moderate bump
+  (`ic_sharpness=1.5`, `bump_amp=0.25`), `t∈[0,20]`, 2001 snapshots, split
+  50/25/25. Coherent sloshing: slow n-width decay, reconstructible future.
+- **Navier–Stokes** (`nse/`) — Kármán vortex street at Re=30 (flow over a
+  cylinder), 2000 velocity snapshots (`d=41682`), fit on the **full data**
+  (`nse_compare_full.py`; `nse_compare.py` is the lossless compressed
+  variant), sensor outputs `y=Cv`. Split 70/15/15 so the training window
+  reaches the saturated shedding limit cycle (with 50% training the future
+  has a 40% out-of-span floor and NO method can reconstruct it).
 
-Feature-selection threshold for Greedy-OPM uses an adaptive `gamma_sp` retaining
-features whose gain exceeds `τ=1e-6` of the largest (near-lossless but still sparse).
+Run (each phase < ~35 s for the sandbox limit; sweeps are resumable):
+```
+python experiments/budget_study.py                         # L-sweep + L* selection
+python experiments/transport/transport_compare.py sweep    # repeat until "SWEEP DONE"
+python experiments/transport/transport_compare.py curves|study|active|field
+python experiments/shallow_water/shallow_water_compare.py sweep|curves|study|active|field
+python experiments/nse/prep_nse.py                         # once
+python experiments/nse/nse_compare_full.py sweep|curves|active|timeseries
+python experiments/nse/nse_greedyopm_field.py              # test-snapshot contour
+python experiments/stability_study.py mu|certificate|all
+python experiments/runtime_compare.py; python experiments/runtime_compare_full.py
+```
 
-## Results (relative reconstruction error, **test** split)
+## Results (relative reconstruction error, train / test, (active features, certificate))
 
-Transport:
-| r | POD | Greedy-QM | Geelen-QM | Fixed-OPM p2 | OPM p2 | OPM p=[2,3] |
-|--|--|--|--|--|--|--|
-| 4 | 8.0e-1 | 5.2e-1 | 5.6e-1 | 3.9e-1 | 3.9e-1 | **4.1e-2** |
-| 6 | 7.0e-1 | 2.2e-1 | 2.5e-1 | 1.0e-1 | 1.0e-1 | **3.7e-4** |
-| 8 | 6.1e-1 | 3.4e-2 | 1.3e-1 | 6.1e-3 | 6.1e-3 | **8.0e-5** |
-| 10 | 5.1e-1 | 6.4e-4 | 9.0e-2 | 1.2e-4 | 2.5e-4 | 1.7e-4 |
+Transport (state, train/test; budget L=1e5):
+| r | POD | Greedy-QM | Geelen-QM (a) | OPM p2 (a, cert) | OPM p=[2,3] (a, cert) |
+|--|--|--|--|--|--|
+| 4 | 0.80/0.77 | 0.48/0.46 | 0.60/0.54 (7) | 0.44/0.45 (10, 795) | 0.53/0.51 (13, 322) |
+| 8 | 0.60/0.54 | 0.02/2.3 | 0.24/0.56 (17) | 0.45/0.42 (10, 339) | 0.33/0.34 (145, 1e5) |
+| 9 | 0.55/0.49 | 0.005/1.5e2 | 0.18/0.35 (20) | 0.48/0.46 (10, 282) | 0.22/0.23 (51, 1e5) |
+| 10 | 0.50/0.44 | ~0/1.9e2 | 0.14/1.3 (20) | 0.50/0.44 (3, 78) | 0.22/0.23 (62, 1e5) |
 
-Shallow water (height h):
-| r | POD | Greedy-QM | Geelen-QM | Fixed-OPM p2 | OPM p2 | OPM p=[2,3] |
-|--|--|--|--|--|--|--|
-| 4 | 5.7e-1 | 3.6e-1 | 3.8e-1 | 2.4e-1 | 2.4e-1 | **7.6e-2** |
-| 6 | 4.4e-1 | 1.5e-1 | 1.7e-1 | 1.1e-1 | 1.1e-1 | **1.1e-3** |
-| 8 | 3.2e-1 | 7.1e-2 | 1.1e-1 | 4.5e-2 | 4.5e-2 | **6.4e-4** |
-| 10 | 2.5e-1 | 2.5e-2 | 6.8e-2 | 7.4e-3 | 7.4e-3 | **4.6e-4** |
+Shallow water (height h, train/test; budget L=3; featured r=8):
+| r | POD | Greedy-QM | Geelen-QM (a) | OPM p2 (a, cert) | OPM p=[2,3] (a, cert) |
+|--|--|--|--|--|--|
+| 3 | 0.43/0.55 | 0.32/0.58 | 0.32/0.58 (6) | 0.30/0.46 (5, ≤3) | 0.40/0.38 (5, ≤3) |
+| 4 | 0.31/0.38 | 0.18/0.48 | 0.19/0.47 (9) | 0.27/0.37 (10, ≤3) | 0.27/0.37 (30, ≤3) |
+| 8 | 0.14/0.32 | 0.015/8 | 0.076/0.33 (17) | 0.12/0.318 (5, ≤3) | 0.119/0.314 (17, ≤3) |
+| 10 | 0.10/0.286 | 0.0037/54 | 0.072/0.288 (15) | 0.093/0.285 (7, ≤3) | 0.090/0.284 (4, ≤3) |
 
-Train and test curves are nearly identical (no overfitting).
+Navier-Stokes FULL data (state, train/test; budget L=1e3):
+| r | POD | Greedy-QM | Geelen-QM (a) | OPM p2 (a, cert) | OPM p=[2,3] (a, cert) |
+|--|--|--|--|--|--|
+| 4 | 0.43/0.36 | 0.28/0.34 | 0.28/0.34 (10) | 0.24/0.19 (10, 42) | 0.105/0.131 (30, 207) |
+| 8 | 0.26/0.23 | 0.08/0.28 | 0.18/0.16 (14) | 0.099/0.125 (35, 315) | 0.038/0.090 (84, 993) |
+| 10 | 0.22/0.19 | 0.042/0.34 | 0.17/0.16 (11) | 0.055/0.155 (53, 796) | 0.042/0.115 (71, 719) |
+
+NSE sensor outputs at r=10 (train/test): OPM p23 5.6e-3/1.4e-2, Geelen
+2.7e-2/2.7e-2, Greedy-QM 5.6e-3/5.8e-2, POD 3.4e-2/2.7e-2.
 
 ## Takeaways
-1. **Greedy mode selection helps**: Greedy-QM < Geelen-QM (which uses leading-r modes), the gap widening with r.
-2. **Orthonormal features beat monomials**: Greedy-Fixed-OPM (p=2) < Greedy-QM at equal degree — the QM Gram matrix is increasingly ill-conditioned.
-3. **Feature selection is ~free**: Greedy-OPM (p=2) tracks the all-features Fixed-OPM while using fewer features (e.g. transport r=10: 49/55).
-4. **Degree enrichment is decisive**: Greedy-OPM (p=[2,3]) is 1–3 orders of magnitude better at low-to-mid r on both problems.
-
-## Implementation note (recommend a fix)
-`GreedyFixedOPM` caps polynomial degrees so the feature count stays ≤ `n`
-(`_effective_degrees`), but **`GreedyOPM` has no such guard**. With p=[2,3] and
-only ~100 SWE training snapshots, the degree-≤3 feature count exceeded `n`,
-violating unisolvence (`n ≥ #features`); the empirical Arnoldi basis became
-rank-deficient and reconstructions blew up to ~1e29. I worked around it here by
-using denser snapshots (401 train > 286 max features). **Recommend** adding the
-same degree/feature-count guard (or a clear error) to `GreedyOPM.fit`.
-
----
-
-# Third experiment: transient Navier–Stokes (Kármán vortex, Re=30)
-
-Heiland/Benner operator-inference dataset in `Dev/Research/transient_ns_pbenner`.
-2000 velocity snapshots over `t∈[0,12]` (`d = 41682` interior DOFs), with a
-`6×d` sensor matrix `C` (`cmat`) and the output `y(t) = C v(t) ∈ ℝ⁶` — exactly
-the `cmat` / output used in the source `runme.py` (read from the index JSON;
-mass matrix `M` also available). No mesh is shipped, so we report the **sensor
-outputs** (as requested) rather than spatial fields.
-
-### Data pipeline (`experiments/nse/`)
-1. `compile_nse.py` — reads `simulation_nse/sc_30_0-12_2000.json`, loads the 2000
-   `*_vel.npy` snapshots restricted to `invinds`, **in time order**, and writes one
-   compiled file: **`transient_ns_pbenner/nse_snapshots.npz`** (`V` (d×2000), `trange`,
-   `C` (6×d)).
-2. `prep_nse.py` — even/odd split; lossless **method-of-snapshots POD** of the
-   training set (`K=408`, captures ≥1−8e-7 of train energy via a Gram-matrix
-   eig), giving reduced coordinates `A=Q^T(V−mean)`, `C_red=C Q`, `y_ref=C mean`,
-   true outputs `Y=C V`, and the (tiny) truncation floors. This makes the
-   `d=41682` problem cheap (every method's internal SVD is now `408×n`).
-3. `nse_compare.py` — resumable sweep + plots (`sweep|curves|timeseries|all`).
-
-POD decays slowly here (only ~96% energy in 10 modes), i.e. a genuinely hard,
-transport-dominated case. `r=1..10` (matching `runme.py`'s `rv=10`), pool `s=25`.
-
-### Results — sensor-output error ‖y−ŷ‖/‖y‖ (test)
-| r | POD | Greedy-QM | Geelen-QM | Fixed-OPM p2 | OPM p2 | OPM p=[2,3] |
-|--|--|--|--|--|--|--|
-| 4 | 5.4e-2 | 4.3e-2 | 5.0e-2 | 3.0e-2 | 3.0e-2 | 1.3e-2 |
-| 6 | 4.1e-2 | 2.6e-2 | 3.3e-2 | 1.6e-2 | 1.6e-2 | **2.0e-3** |
-| 8 | 4.0e-2 | 1.1e-2 | 2.9e-2 | 8.4e-3 | 8.4e-3 | **2.0e-4** |
-| 10 | 3.4e-2 | 4.7e-3 | 1.6e-2 | 3.3e-3 | 3.3e-3 | **1.2e-4** |
-
-Same ordering as the other two problems (Greedy-QM > Geelen-QM; orthonormal OPM >
-monomial QM; feature selection ≈ lossless; cubic enrichment decisive — ~40× lower
-output error than Greedy-QM at r=8). Train ≈ test throughout.
-
-### Plots
-`nse_state_error_vs_r.png`, `nse_output_error_vs_r.png`,
-`nse_output_timeseries.png` (the six `y(t)=Cx` traces, ground truth vs every
-method, full trajectory at r=10).
-
-Note: errors here are Euclidean (consistent with the other experiments and with
-what the methods optimize). The dataset also provides the FEM mass matrix `M` if
-you'd prefer the physical `‖·‖_M` norm used in `runme.py`.
-
+1. **Out-of-distribution testing exposes the unregularized methods**:
+   Greedy-QM and Fixed-OPM interpolate training data at higher r but blow up
+   on the future window (test errors up to 10²).
+2. **Every reported Greedy-OPM model is certified** (`L̂_Γ(0.1) ≤ L`) with
+   one budget per experiment fixed a priori from the budget study — nothing
+   is tuned on the test window and `mu` is not tuned at all.
+3. **The budget is a regularizer, not just a guarantee** (`budget_study.py`):
+   on transport and NSE the validation-best budget is *finite* (1e5 / 1e3);
+   on SWE the very tight L=3 is optimal — heavily damped liftings transfer
+   best to the future wave field. Feature counts grow with L: looser budgets
+   license denser certified dictionaries.
+4. **Results under the pure Algorithm-4 pipeline**: transport — OPM p23 is
+   the only method improving at large r (test 0.23 at r≥9, below any
+   baseline at any r) though at r=7 Geelen-QM (0.236) wins locally; SWE — at
+   every r≥2 an OPM variant beats POD on both windows (split across variants
+   at r=7) while no baseline does; NSE — OPM p23 dominates all methods on
+   both windows at every r (state test 0.090 at r=8, ~1.8x below Geelen-QM).
+5. **Stability study** (`stability_study.py`): at `mu=0` the full-feature
+   manifold's test error explodes (transport: 7.8e3); the surrogate targets
+   the certificate (drives it monotonically to 1, guaranteeing termination
+   of the budget loop for any `L>1`); the optional exact penalty
+   (`polish_exact`, not used in the main pipeline) minimizes the true
+   Jacobian norm (tighter actual stability, looser certificate).
