@@ -84,7 +84,77 @@ def _validate_ortho_family(
 
 
 # =============================================================================
-# GreedyOPM  --  joint mode + feature selection 
+# Budgeted (knapsack) feature admission
+# =============================================================================
+
+
+def _admit(gains, costs, eligible, slack) -> np.ndarray:
+    """Density-greedy knapsack admission (exact final-selection version).
+
+    Admits eligible features in decreasing order of gain density
+    ``gains / costs`` (zero-cost features first), skipping any feature whose
+    cost exceeds the remaining slack; falls back to the single best eligible
+    feasible feature if that alone yields a larger gain (classical 1/2-
+    approximation guarantee).  Returns the sorted indices of admitted
+    features.
+    """
+    gains = np.asarray(gains, dtype=float)
+    costs = np.asarray(costs, dtype=float)
+    eligible = np.asarray(eligible, dtype=bool) & (costs <= slack)
+    idx = np.where(eligible)[0]
+    if idx.size == 0 or not np.isfinite(slack):
+        return np.where(np.asarray(eligible))[0] if idx.size else idx
+    with np.errstate(divide="ignore", invalid="ignore"):
+        density = np.where(costs[idx] > 0.0, gains[idx] / costs[idx], np.inf)
+    order = idx[np.argsort(-density, kind="stable")]
+    admitted, used = [], 0.0
+    for k in order:
+        if used + costs[k] <= slack + 1e-12 * max(slack, 1.0):
+            admitted.append(int(k))
+            used += costs[k]
+    admitted = np.asarray(sorted(admitted), dtype=np.int64)
+    k_star = idx[int(np.argmax(gains[idx]))]
+    if gains[admitted].sum() < gains[k_star]:
+        admitted = np.asarray([int(k_star)], dtype=np.int64)
+    return admitted
+
+
+def _admit_batch(gain, cost, eligible, slack) -> jnp.ndarray:
+    """Vectorised in-loop admission: total admitted gain per candidate.
+
+    ``gain``, ``cost``: (n_cand, m) arrays; ``eligible``: (n_cand, m) bool.
+    For each candidate, admits eligible features in decreasing gain-density
+    order, skipping features that exceed the remaining slack (lax.scan), and
+    returns ``max(greedy_gain, best_single_gain)`` -- the same rule as
+    :func:`_admit`, evaluated for all candidates in parallel.
+    """
+    if not np.isfinite(slack):
+        return jnp.sum(jnp.where(eligible, gain, 0.0), axis=1)
+    feasible = eligible & (cost <= slack)
+    g = jnp.where(feasible, gain, 0.0)
+    c = jnp.where(feasible, cost, jnp.inf)
+    density = jnp.where(c > 0.0, g / jnp.maximum(c, 1e-300), jnp.inf)
+    density = jnp.where(feasible, density, -jnp.inf)
+    order = jnp.argsort(-density, axis=1)
+    g_sorted = jnp.take_along_axis(g, order, axis=1)
+    c_sorted = jnp.take_along_axis(c, order, axis=1)
+
+    def scan_one(g_row, c_row):
+        def step(used, gc):
+            gk, ck = gc
+            take = (used + ck) <= slack
+            used = jnp.where(take, used + ck, used)
+            return used, jnp.where(take, gk, 0.0)
+        _, taken = jax.lax.scan(step, 0.0, (g_row, c_row))
+        return jnp.sum(taken)
+
+    greedy_gain = jax.vmap(scan_one)(g_sorted, c_sorted)
+    best_single = jnp.max(g, axis=1)
+    return jnp.maximum(greedy_gain, best_single)
+
+
+# =============================================================================
+# GreedyOPM  --  joint mode + feature selection
 # =============================================================================
 
 
@@ -104,7 +174,7 @@ class GreedyOPM:
         * list: use exactly those polynomial degrees (each >= 2).
     gamma_sp : float
         Sparsity parameter for group soft-thresholding.  A feature k is
-        active iff ``||r_tilde_k||_2 > gamma_sp / n``, equivalently iff the
+        eligible iff ``||r_tilde_k||_2 > gamma_sp / n``, equivalently iff the
         error reduction from activating it exceeds ``gamma_sp^2 / n``.
     gamma : float
         Tikhonov regularisation for the final lifting matrix.
@@ -126,14 +196,6 @@ class GreedyOPM:
         fixed span, so the selected modes are independent of this choice.
     center : bool
         Whether to subtract the snapshot mean before SVD.
-    mu : float
-        Stability (Jacobian) regularization weight.  With ``mu > 0`` the
-        per-feature gain is divided by ``c_k = n + gamma + mu * E_k`` where
-        ``E_k`` is the empirical Dirichlet energy of feature k (mean squared
-        gradient norm over the probe points), the greedy mode score becomes
-        ``sigma^2 + sum_active (n ||r_k|| - gamma_sp)^2 / c_k``, and the final
-        lifting columns are shrunk by ``n / c_k``.  ``mu = 0`` reproduces the
-        original algorithm exactly.  Requires ``ortho_method='arnoldi'``.
     n_grad_samples : int, optional
         Number of (evenly spaced) training snapshots used as probe points for
         the gradient pass in the greedy loop.  ``None`` uses all n snapshots.
@@ -142,21 +204,25 @@ class GreedyOPM:
         state: gradients are evaluated at ``(1 + delta) * s_hat``, probing the
         out-of-distribution collar where instability manifests.
     budget : float, optional
-        Lipschitz budget ``L > 1``.  When given, :meth:`fit` runs the outer
-        certificate loop of the greedy algorithm after the final solve,
-        increasing ``mu`` geometrically until
-        ``lipschitz_certificate(grad_dilation) <= budget``.
+        Lipschitz budget ``L > 1`` (``None`` = unconstrained).  When given,
+        feature selection becomes the budget-constrained knapsack admission
+        of the paper: each eligible feature carries a closed-form Lipschitz
+        cost ``lambda_k = ||vbar_k|| * L_psi_k(delta)`` and features are
+        admitted greedily by gain density ``G_k / lambda_k`` while the
+        cumulative cost stays within the slack ``sqrt(L^2 - 1)``.  The fitted
+        model then satisfies ``lipschitz_certificate(grad_dilation) <= L``
+        BY CONSTRUCTION; no penalty, shrinkage, or outer loop is involved.
+        Requires ``ortho_method='arnoldi'``.
 
     Notes
     -----
-    The activation rule is the mu-independent group soft-threshold of the
-    paper's one-step theorem: feature k is active iff
-    ``||r_k||_2 > gamma_sp / n``, and its lifting column is
-    ``(1 - gamma_sp / (n ||r_k||))_+ * (n / c_k) * r_k`` with
-    ``c_k = n + gamma + mu * E_k``.  A prescribed Lipschitz budget ``L`` can
-    be enforced a posteriori with :meth:`enforce_budget`, which increases
-    ``mu`` geometrically until the certificate satisfies
-    ``lipschitz_certificate(dilation) <= L``.
+    Eligibility is the group soft-threshold of the paper's one-step theorem:
+    feature k is eligible iff ``||r_k||_2 > gamma_sp / n``, and an admitted
+    feature's lifting column is the unshrunk closed form
+    ``(1 - gamma_sp / (n ||r_k||))_+ * (n / (n + gamma)) * r_k``.  With
+    ``budget=None`` every eligible feature is admitted (the unconstrained
+    algorithm); with a finite budget the admitted set is the density-greedy
+    knapsack solution (>= 1/2 of the optimal admissible gain).
     """
 
     def __init__(
@@ -173,7 +239,6 @@ class GreedyOPM:
         basis: Literal["hybrid", "hierarchical"] = "hybrid",
         ortho_method: Literal["qr", "cholesky", "arnoldi"] = "arnoldi",
         center: bool = True,
-        mu: float = 0.0,
         n_grad_samples: Optional[int] = None,
         grad_dilation: float = 0.0,
         budget: Optional[float] = None,
@@ -183,14 +248,8 @@ class GreedyOPM:
                 f"ortho_method must be one of {_ORTHO_METHODS}; got {ortho_method!r}."
             )
         _validate_ortho_family(ortho_method, family, "GreedyOPM")
-        if mu < 0.0:
-            raise ValueError(f"mu must be >= 0; got {mu}.")
-        if mu > 0.0 and ortho_method != "arnoldi":
-            raise ValueError(
-                "Stability regularization (mu > 0) requires "
-                "ortho_method='arnoldi' (the gradient recurrence reuses the "
-                "stored Arnoldi H)."
-            )
+        if budget is not None and np.isinf(budget):
+            budget = None
         if budget is not None:
             if budget <= 1.0:
                 raise ValueError(
@@ -202,7 +261,6 @@ class GreedyOPM:
                     "A Lipschitz budget requires ortho_method='arnoldi'."
                 )
         self.budget = None if budget is None else float(budget)
-        self.mu = float(mu)
         self.n_grad_samples = n_grad_samples
         self.grad_dilation = float(grad_dilation)
 
@@ -225,7 +283,8 @@ class GreedyOPM:
     # fit
     # =====================================================================
 
-    def fit(self, S: jnp.ndarray, *, svd=None) -> "GreedyOPM":
+    def fit(self, S: jnp.ndarray, *, svd=None, J_init=None,
+            max_new_iters: Optional[int] = None) -> "GreedyOPM":
         """Fit the greedy OPM to snapshot data ``S`` of shape ``(d, n)``.
 
         ``svd`` optionally provides a precomputed truncated SVD
@@ -238,12 +297,22 @@ class GreedyOPM:
         multivariate Arnoldi process on the (i+1)-dimensional reduced
         coordinates (J_{i-1} ∪ {j'}). This is vectorised across candidates
         via ``vmap``.
+
+        Resumable greedy loop: ``J_init`` seeds the selected-mode list (the
+        entire loop state), and ``max_new_iters`` bounds the number of NEW
+        greedy iterations performed by this call.  If the loop is interrupted
+        (``len(J) < r``), the partial selection is stored in ``partial_J_``
+        and the model is returned UNFITTED; call ``fit`` again with
+        ``J_init=model.partial_J_`` to continue.  This allows very expensive
+        fits (large degree-4 dictionaries) to be spread across wall-clock
+        limited calls.
         """
         d, n = S.shape
         n_f = jnp.asarray(float(n), dtype=S.dtype)
         gamma_sp_f = jnp.asarray(float(self.gamma_sp), dtype=S.dtype)
         gamma_f = jnp.asarray(float(self.gamma), dtype=S.dtype)
-        mu_f = jnp.asarray(float(self.mu), dtype=S.dtype)
+        slack = (np.sqrt(self.budget ** 2 - 1.0)
+                 if self.budget is not None else np.inf)
 
         # --- 1. Center ----------------------------------------------------
         if self.center:
@@ -278,12 +347,19 @@ class GreedyOPM:
 
         n_reorth_eff = max(1, int(self.n_reorth))
 
-        # --- 3. Greedy loop -----------------------------------------------
-        J: list[int] = []
-        J_complement: set[int] = set(range(s_eff))
+        # --- 3. Greedy loop (resumable via J_init / max_new_iters) --------
+        J: list[int] = [int(j) for j in (J_init or [])]
+        J_complement: set[int] = set(range(s_eff)) - set(J)
         self._iteration_records: list[dict] = []
+        self.partial_J_ = None
+        new_iters = 0
 
-        for i in range(self.r):
+        for i in range(len(J), self.r):
+            if max_new_iters is not None and new_iters >= max_new_iters:
+                self.partial_J_ = list(J)
+                self._fitted = False
+                return self
+            new_iters += 1
             n_coords_trial = i + 1
             candidates_py = sorted(J_complement)
             candidates_arr = jnp.array(candidates_py, dtype=jnp.int32)
@@ -337,33 +413,36 @@ class GreedyOPM:
             norms_sq = total - diag_                                   # per-cand, per-feature
 
             threshold_sq = (gamma_sp_f * inv_n) ** 2
-            active_mask = norms_sq > threshold_sq
+            eligible_mask = norms_sq > threshold_sq
             norms = jnp.sqrt(jnp.maximum(norms_sq, 0.0))
 
-            if self.mu > 0.0:
-                # -- 3e'. Per-feature Dirichlet energies -------------------
+            # Per-feature gain of the one-step theorem:
+            # G_k = (n ||r_k|| - gamma_sp)_+^2 / (n + gamma).
+            excess = jnp.maximum(n_f * norms - gamma_sp_f, 0.0)
+            gain = excess ** 2 / (n_f + gamma_f)
+
+            if self.budget is not None:
+                # -- 3e'. Budget-constrained admission ---------------------
                 # Gradient pass (differentiated Arnoldi recurrence) on the
-                # (subsampled, dilated) probe coordinates.
+                # (subsampled, dilated) probe coordinates gives the
+                # per-feature sup-norm bounds L_psi_k(delta); each feature's
+                # Lipschitz cost is the closed-form
+                # lambda_k = ||vbar_k*|| L_psi_k = excess_k L_psi_k/(n+gamma).
                 probe = trial_S_hat_all[:, :, self._probe_idx(n)]
                 probe = (1.0 + self.grad_dilation) * probe
                 _, G_all = arnoldi_grad_batch(
                     probe, H_all, ell_arr_i, parent_arr_i,
                 )                                     # (n_cand, M_i, i+1, n_g)
                 G_nl = G_all[:, nl_start:, :, :]
-                dir_energy = jnp.mean(
-                    jnp.sum(G_nl ** 2, axis=2), axis=2,
+                L_psi_c = jnp.sqrt(
+                    jnp.max(jnp.sum(G_nl ** 2, axis=2), axis=2),
                 )                                     # (n_cand, m_nl)
-                c_k = n_f + gamma_f + mu_f * dir_energy
+                cost = excess * L_psi_c / (n_f + gamma_f)
+                poly_gain = _admit_batch(gain, cost, eligible_mask, slack)
             else:
-                c_k = n_f + gamma_f
-
-            # Regularized per-feature gain of the one-step theorem:
-            # G_k = (n ||r_k|| - gamma_sp)_+^2 / c_k with
-            # c_k = n + gamma + mu E_k  (mu = 0: c_k = n + gamma).
-            gain = (n_f * norms - gamma_sp_f) ** 2 / c_k
-            poly_gain = jnp.sum(
-                jnp.where(active_mask, gain, 0.0), axis=1,
-            )                                                          # (n_cand,)
+                poly_gain = jnp.sum(
+                    jnp.where(eligible_mask, gain, 0.0), axis=1,
+                )                                                      # (n_cand,)
             delta = sigma_cands ** 2 + poly_gain                       # argmax score
 
 
@@ -380,7 +459,7 @@ class GreedyOPM:
                 "delta": float(delta[best_local]),
                 "linear_gain": float(sigma_s[j_star] ** 2),
                 "poly_gain": float(poly_gain[best_local]),
-                "n_active_features": int(jnp.sum(active_mask[best_local])),
+                "n_eligible_features": int(jnp.sum(eligible_mask[best_local])),
             })
 
         # --- 4. Finalise: selected modes + final basis --------------------
@@ -446,48 +525,28 @@ class GreedyOPM:
         )                                                              # (d, m_nl)
         self.importances_ = jnp.sum(self.C_nl_ ** 2, axis=0)           # (m_nl,)
 
-        # Final per-feature Dirichlet energies (stability note, eq. (11)):
-        # E_k = mean_l || grad psi_k(s_hat^(l)) ||^2 over the probe points.
-        # Used to shrink the lifting columns by n / (n + gamma + mu E_k).
-        if self.mu > 0.0:
-            probe = (1.0 + self.grad_dilation) * self.S_hat_[:, self._probe_idx(n)]
-            _, G_final = arnoldi_eval_grad(probe, self.arnoldi_basis_)
-            G_nl_final = G_final[self.n_linear_:]                    # (m_nl, r, n_g)
-            self.dirichlet_nl_ = jnp.mean(
-                jnp.sum(G_nl_final ** 2, axis=1), axis=1,
-            )                                                         # (m_nl,)
-        else:
-            self.dirichlet_nl_ = jnp.zeros(self.m_nl_, dtype=S.dtype)
-        self.K_nl_ = None       # exact gradient coupling (lazy; polish_exact)
-        self.mu_exact_ = None   # mu used by the last exact-penalty polish
-
         # Total polynomial degree of every feature (row of multi_indices_),
         # used to break the active nonlinear set down by degree (quad/cubic/…).
         self.feature_degrees_ = (
             self._multi_indices_np_.sum(axis=1).astype(np.int32)
         )
 
-        # Compute active_nl_global_, Vbar_nl_, selected_ for the current gamma_sp.
+        # --- 6. Exact final selection + certificate -----------------------
+        # Final lines of the greedy algorithm: a gradient pass on the full
+        # dilated cloud yields the exact per-feature bounds L_psi_k(delta);
+        # eligibility, gains, costs, and the budgeted admission are then
+        # recomputed from the EXACT d-dimensional residual correlations, so
+        # the certificate L_Gamma(delta) <= L holds by construction.
         self.L_psi_ = None            # per-feature sup-norm gradient cache
         self.L_psi_dilation_ = None
         self.certificate_ = None
+        if self.ortho_method == "arnoldi":
+            self._ensure_L_psi(self.grad_dilation)
         self.set_sparsity(self.gamma_sp)
 
         # Cache normalization params (used only for the classical-family paths)
         if self.ortho_method != "arnoldi" and self.basis == "hybrid":
             self._store_normalization_params(self.S_hat_)
-
-        # --- 6. Stability certificate + optional budget enforcement -------
-        # Final lines of the greedy algorithm: a gradient pass on the dilated
-        # cloud yields the per-feature bounds L_psi_k(delta) and the
-        # a-posteriori certificate L_Gamma(delta); if a budget is prescribed
-        # and exceeded, the outer loop increases mu geometrically.
-        if self.ortho_method == "arnoldi":
-            self._ensure_L_psi(self.grad_dilation)
-            self._update_certificate()
-            if self.budget is not None and self.certificate_ > self.budget:
-                self.enforce_budget(self.budget,
-                                    dilation=self.grad_dilation)
 
         self._fitted = True
         return self
@@ -514,8 +573,10 @@ class GreedyOPM:
         delta = self.grad_dilation if dilation is None else float(dilation)
         if self.L_psi_ is not None and self.L_psi_dilation_ == delta:
             return
-        n = int(self.Psi_.shape[1])
-        probe = (1.0 + delta) * self.S_hat_[:, self._probe_idx(n)]
+        # Final certificate pass: always the FULL dilated cloud (the in-loop
+        # scoring may subsample via n_grad_samples, but the returned
+        # certificate is exact on the complete dilated training data).
+        probe = (1.0 + delta) * self.S_hat_
         _, G = arnoldi_eval_grad(probe, self.arnoldi_basis_)
         G_nl = G[self.n_linear_:]                            # (m_nl, r, n_g)
         self.L_psi_ = jnp.sqrt(jnp.max(jnp.sum(G_nl ** 2, axis=1), axis=1))
@@ -612,188 +673,58 @@ class GreedyOPM:
 
         return jax.vmap(one_point, in_axes=2)(Jp)
 
-    def _ensure_dirichlet(self, dilation: Optional[float] = None) -> None:
-        """Compute the per-feature Dirichlet energies once if missing.
+    # =====================================================================
+    # Selection re-application  (cheap (gamma_sp, budget) sweep -- no refit)
+    # =====================================================================
 
-        The energies are mu-independent, so they are computed lazily (fit()
-        stores zeros when ``mu == 0``) on the dilated probe cloud.
-        """
-        if bool(jnp.any(self.dirichlet_nl_ > 0.0)):
-            return
-        delta = self.grad_dilation if dilation is None else float(dilation)
-        n = int(self.Psi_.shape[1])
-        probe = (1.0 + delta) * self.S_hat_[:, self._probe_idx(n)]
-        _, G = arnoldi_eval_grad(probe, self.arnoldi_basis_)
-        G_nl = G[self.n_linear_:]
-        self.dirichlet_nl_ = jnp.mean(jnp.sum(G_nl ** 2, axis=1), axis=1)
-
-    def set_mu(self, mu: float, *, dilation: Optional[float] = None) -> "GreedyOPM":
-        """Re-solve the final lifting for a new stability weight ``mu``.
-
-        Implements the mu-only repetition of the final solve in the greedy
-        algorithm: the Arnoldi basis, the residual correlations ``r_k``, and
-        the active set are all mu-independent, so changing ``mu`` only
-        rescales the lifting columns by ``n / c_k``.  This makes sweeping
-        ``mu`` on a validation set as cheap as sweeping ``gamma_sp``.
-        """
-        if mu < 0.0:
-            raise ValueError(f"mu must be >= 0; got {mu}.")
-        if mu > 0.0 and self.ortho_method != "arnoldi":
-            raise ValueError("set_mu with mu > 0 requires ortho_method='arnoldi'.")
-        if mu > 0.0:
-            self._ensure_dirichlet(dilation)
-        self.mu = float(mu)
-        self.set_sparsity(self.gamma_sp)
-        return self
-
-    def _ensure_grad_coupling(self, dilation: Optional[float] = None) -> None:
-        """Cache the exact gradient coupling matrix ``K_nl_`` once.
-
-        ``K = (1/n_g) sum_l J_p(s_l) J_p(s_l)^T`` over the (subsampled,
-        dilated) probe cloud; its diagonal is the Dirichlet energies.
-        """
-        if getattr(self, "K_nl_", None) is not None:
-            return
-        delta = self.grad_dilation if dilation is None else float(dilation)
-        n = int(self.Psi_.shape[1])
-        probe = (1.0 + delta) * self.S_hat_[:, self._probe_idx(n)]
-        _, G = arnoldi_eval_grad(probe, self.arnoldi_basis_)
-        G_nl = G[self.n_linear_:]                          # (m_nl, r, n_g)
-        self.K_nl_ = jnp.einsum("krl,jrl->kj", G_nl, G_nl) / G_nl.shape[2]
-        if not bool(jnp.any(self.dirichlet_nl_ > 0.0)):
-            self.dirichlet_nl_ = jnp.diagonal(self.K_nl_)
-
-    def polish_exact(
-        self, mu: float, *, dilation: Optional[float] = None,
+    def set_sparsity(
+        self, gamma_sp: float, budget: Optional[float] = "unchanged",
     ) -> "GreedyOPM":
-        """OPTIONAL exact-penalty polish of the lifting columns.
-
-        This is NOT part of the greedy algorithm's fit path (which uses the
-        diagonal surrogate throughout, as in the paper); it is an opt-in
-        post-processing step that must be called explicitly after
-        :meth:`fit` / :meth:`set_sparsity`.
-
-        Keeps the active set produced by the group soft-threshold
-        (:meth:`set_sparsity`) and replaces the active lifting columns by the
-        minimizer of the EXACT empirical Jacobian penalty,
-
-            ``Vbar_A = E P_A^T ((n + gamma) I + mu K_AA)^{-1}``,
-
-        where ``K`` is the gradient coupling matrix on the dilated probe
-        cloud.  This is the optional coupled ``m_A x m_A`` solve of the
-        paper; it improves on the diagonal surrogate when the gradient
-        coherence is high.  Call AFTER :meth:`set_sparsity` (which resets the
-        columns to the surrogate solution).
-        """
-        if mu < 0.0:
-            raise ValueError(f"mu must be >= 0; got {mu}.")
-        if self.ortho_method != "arnoldi":
-            raise ValueError("polish_exact requires ortho_method='arnoldi'.")
-        self._ensure_grad_coupling(dilation)
-        n = int(self.Psi_.shape[1])
-        act = self.active_nl_global_ - self.n_linear_
-        if int(act.shape[0]) == 0:
-            return self
-        K_AA = self.K_nl_[jnp.ix_(act, act)]
-        A = (n + self.gamma) * jnp.eye(int(act.shape[0])) + mu * K_AA
-        # E P_A^T = n * C_nl_[:, act];  Vbar_A = (n C_A) A^{-1}
-        C_A = self.C_nl_[:, act]
-        self.Vbar_nl_ = n * jnp.linalg.solve(A.T, C_A.T).T
-        self.mu_exact_ = float(mu)
-        self._update_certificate()            # certificate stays valid
-        return self
-
-    def enforce_budget(
-        self,
-        L: float,
-        *,
-        dilation: Optional[float] = None,
-        mu0: float = 1.0,
-        growth: float = 10.0,
-        max_iter: int = 200,
-    ) -> float:
-        """Enforce a Lipschitz budget ``L`` by geometrically increasing ``mu``.
-
-        Implements the outer certificate loop of the greedy algorithm: while
-        ``lipschitz_certificate(dilation) > L``, multiply ``mu`` by ``growth``
-        (starting from ``mu0`` if ``mu == 0``) and recompute the lifting
-        columns via :meth:`set_sparsity`.  The active set is mu-independent
-        (one-step theorem), the column norms shrink monotonically to zero as
-        ``mu -> infinity``, and the certificate decreases monotonically to 1,
-        so the loop terminates for any ``L > 1``.
-
-        Returns the final certificate value (also stored as
-        ``self.certificate_``).
-        """
-        if self.ortho_method != "arnoldi":
-            raise ValueError("enforce_budget requires ortho_method='arnoldi'.")
-        if L <= 1.0:
-            raise ValueError(
-                f"The certificate is always >= 1; budget L must be > 1 "
-                f"(got {L})."
-            )
-        delta = self.grad_dilation if dilation is None else float(dilation)
-        self._ensure_dirichlet(delta)
-        # Per-feature sup-norm gradient bounds on the dilated cloud, computed
-        # once and cached; each loop iteration only rescales column norms.
-        self._ensure_L_psi(delta)
-
-        cert = self._update_certificate()
-        it = 0
-        while cert > L and it < max_iter:
-            self.mu = mu0 if self.mu == 0.0 else self.mu * growth
-            self.set_sparsity(self.gamma_sp)      # refreshes certificate_
-            cert = self.certificate_
-            it += 1
-        if cert > L:
-            warnings.warn(
-                f"enforce_budget: certificate {cert:.3g} still exceeds "
-                f"budget {L} after {max_iter} iterations.",
-                stacklevel=2,
-            )
-        self.certificate_ = cert
-        return cert
-
-    # =====================================================================
-    # Sparsity re-thresholding  (cheap gamma_sp sweep -- no refit)
-    # =====================================================================
-
-    def set_sparsity(self, gamma_sp: float) -> "GreedyOPM":
-        """Re-threshold the active nonlinear set for a new ``gamma_sp``.
+        """Re-run eligibility + budgeted admission for new parameters.
 
         Reuses the stored full-basis correlation ``C_nl_`` (columns
-        ``r_k = (1/n) E P_nl^T``) and per-feature importances from the single
-        greedy fit, so sweeping ``gamma_sp`` costs only O(d · |active|) with
-        no SVD / Arnoldi rebuild.  Implements the one-step theorem exactly:
-        feature k is active iff ``||r_k|| > gamma_sp / n``, and its lifting
-        column is the group soft-thresholded
-
-            ``vbar_k = (1 - gamma_sp / (n ||r_k||))_+ * (n / c_k) * r_k``,
-
-        with ``c_k = n + gamma + mu * E_k`` (mu = 0 recovers
-        ``(n / (n + gamma)) r_k``).
+        ``r_k = (1/n) E P_nl^T``), the per-feature importances, and the cached
+        gradient bounds ``L_psi_`` from the single greedy fit, so sweeping
+        ``gamma_sp`` (or the budget) costs only O(m_nl log m_nl + d·|active|)
+        with no SVD / Arnoldi rebuild.  Feature k is ELIGIBLE iff
+        ``||r_k|| > gamma_sp / n`` (one-step theorem); the ACTIVE set is the
+        density-greedy knapsack admission under the Lipschitz slack
+        ``sqrt(L^2 - 1)`` (all eligible features when ``budget is None``).
+        An admitted feature's lifting column is the unshrunk closed form
+        ``(1 - gamma_sp / (n ||r_k||))_+ * (n / (n + gamma)) * r_k``.
         """
         self.gamma_sp = float(gamma_sp)
+        if budget != "unchanged":
+            if budget is not None and (np.isinf(budget) or budget <= 1.0):
+                budget = None if np.isinf(budget) else budget
+                if budget is not None:
+                    raise ValueError(f"budget must be > 1; got {budget}.")
+            self.budget = None if budget is None else float(budget)
         n = int(self.Psi_.shape[1])
-        norms = jnp.sqrt(self.importances_)
-        threshold = self.gamma_sp / n
-        active_nl_local = jnp.where(norms > threshold)[0]
+        norms = np.sqrt(np.asarray(self.importances_))
+        excess = np.maximum(n * norms - self.gamma_sp, 0.0)
+        eligible = excess > 0.0
+        gains = excess ** 2 / (n + self.gamma)
+        if self.budget is not None:
+            if getattr(self, "L_psi_", None) is None:
+                self._ensure_L_psi(self.grad_dilation)
+            costs = excess * np.asarray(self.L_psi_) / (n + self.gamma)
+            slack = float(np.sqrt(self.budget ** 2 - 1.0))
+            active_nl_local = _admit(gains, costs, eligible, slack)
+        else:
+            active_nl_local = np.where(eligible)[0]
+        active_nl_local = jnp.asarray(active_nl_local, dtype=jnp.int64)
         self.active_nl_global_ = self.n_linear_ + active_nl_local
-        # One-step solution (Theorem `one-step`): group soft-threshold factor
-        # times the stability-aware shrinkage n / c_k.
-        c_act = (
-            n + self.gamma + self.mu * self.dirichlet_nl_[active_nl_local]
-        )
-        soft = jnp.maximum(
-            1.0 - self.gamma_sp / (n * norms[active_nl_local]), 0.0,
-        )
-        self.Vbar_nl_ = (soft * n / c_act)[None, :] * self.C_nl_[:, active_nl_local]
+        norms_j = jnp.sqrt(self.importances_)[active_nl_local]
+        soft = jnp.maximum(1.0 - self.gamma_sp / (n * norms_j), 0.0)
+        scale = soft * n / (n + self.gamma)
+        self.Vbar_nl_ = scale[None, :] * self.C_nl_[:, active_nl_local]
         linear_indices = jnp.arange(self.n_linear_)
         self.selected_ = jnp.concatenate(
             [linear_indices, self.active_nl_global_],
         )
         self.Psi_selected_ = self.Psi_[self.selected_]
-        self._update_certificate()            # no-op before the fit finishes
+        self._update_certificate()            # no-op before L_psi_ is cached
         return self
 
     @property
@@ -961,16 +892,17 @@ class GreedyOPM:
         """Energy breakdown: POD + nonlinear + residual.
 
         The nonlinear part is the additive error reduction of the paper's
-        decomposition, ``sum_active (n ||r_k|| - gamma_sp)_+^2 / c_k``.
+        decomposition, ``sum_active (n ||r_k|| - gamma_sp)_+^2 / (n+gamma)``,
+        summed over the ADMITTED features.
         """
         total = float(jnp.sum(self.sigma_s_ ** 2))
         pod = float(jnp.sum(self.sigma_s_[jnp.asarray(self.J_)] ** 2))
         n = self.Psi_.shape[1]
         norms = jnp.sqrt(self.importances_)
-        active = norms > self.gamma_sp / n
-        c_k = n + self.gamma + self.mu * self.dirichlet_nl_
-        gains = (n * norms - self.gamma_sp) ** 2 / c_k
-        nl = float(jnp.sum(jnp.where(active, gains, 0.0)))
+        act = self.active_nl_global_ - self.n_linear_
+        gains = ((n * norms[act] - self.gamma_sp) ** 2
+                 / (n + self.gamma))
+        nl = float(jnp.sum(gains))
         residual = max(total - pod - nl, 0.0)
         return {
             "total": total, "pod": pod, "nonlinear": nl,
@@ -1009,7 +941,8 @@ class GreedyOPM:
             "total_selected": self.n_total_features,
             "gamma_sp": self.gamma_sp,
             "gamma": self.gamma,
-            "mu": self.mu,
+            "budget": self.budget,
+            "certificate": self.certificate_,
             "grad_dilation": self.grad_dilation,
             "family": self.family,
             "basis": self.basis,

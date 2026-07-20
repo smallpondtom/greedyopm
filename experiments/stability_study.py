@@ -1,27 +1,24 @@
-"""Stability study for the Greedy-OPM (Jacobian regularization + certificate).
+"""Stability study for the budget-constrained Greedy-OPM.
 
-Uses the periodic advection-diffusion transport problem with the TEMPORAL
-train / val / test split (test = far future, genuinely out-of-distribution)
-and the full nonlinear feature set (gamma_sp = 0), so the effect of the
-stability weight mu is isolated.  Three assessments:
+Transport problem, temporal train/val/test split, quadratic-plus-cubic
+dictionary at r=6 with gamma_sp=0 (every feature eligible), so the Lipschitz
+budget L is the only control.  Two assessments:
 
-1. ``mu-sweep``   -- train / val / test error and the a posteriori Lipschitz
-   certificate L_hat(delta) as functions of mu, for BOTH the diagonal
-   surrogate shrinkage (``set_mu``) and the exact coupled Jacobian penalty
-   (``polish_exact``).  Shows the OOD blow-up at mu = 0, its suppression as
-   mu grows, and the monotone decrease of the certificate toward 1.
+1. ``budget``      -- for each prescribed budget L a fresh budget-aware fit
+   is run (in-loop knapsack admission).  Records train/test errors, the
+   number of admitted features, the a posteriori certificate
+   L_hat_Gamma(delta) <= L (holds BY CONSTRUCTION), and the measured maximal
+   pointwise Jacobian norm max_l ||J_Gamma||_2 on the dilated probe cloud.
+   Shows the OOD blow-up in the unconstrained limit, its suppression as L
+   tightens, and the accuracy/guarantee trade-off.
 
-2. ``certificate`` -- validity check: the certificate upper-bounds the
-   pointwise Jacobian norms ||J_Gamma(s_hat)||_2 on the (dilated) probe cloud
-   and on the encoded TEST trajectory.
+2. ``certificate`` -- validity check: the certificate must upper-bound the
+   pointwise Jacobian norms on both the dilated training cloud and the
+   encoded test trajectory.
 
-3. ``budget``     -- budget enforcement: for prescribed budgets L, the outer
-   mu-loop (``enforce_budget``) returns a decoder whose certificate is <= L;
-   reports the resulting mu, certificate, and errors.
+Outputs plots/stability_budget.{png,pdf} and plots/stability_study.json.
 
-Outputs: JSON + plots in experiments/plots/.
-
-Usage:  python experiments/stability_study.py [mu|certificate|budget|all]
+Usage:  python experiments/stability_study.py [budget|certificate|plots|all]
 """
 
 from __future__ import annotations
@@ -54,6 +51,7 @@ OUT_JSON = PLOTS / "stability_study.json"
 R, S_POOL, DEGREES = 6, 100, [2, 3]
 DELTA = 0.1          # extrapolation margin for the certificate probes
 GAMMA = 1e-13
+L_GRID = [1.5, 3.0, 10.0, 30.0, 1e2, 316.0, 1e3, 1e4, 1e5, 1e6, 1e7, np.inf]
 
 
 def _data():
@@ -62,159 +60,92 @@ def _data():
     return tuple(jnp.asarray(S[:, idx]) for idx in (itr, iva, ite))
 
 
-def _fit(S_tr):
+def _fit(S_tr, L):
+    budget = None if np.isinf(L) else float(L)
     return GreedyOPM(r=R, s=S_POOL, p=DEGREES, gamma_sp=0.0, gamma=GAMMA,
                      ortho_method="arnoldi", center=True, n_reorth=2,
-                     grad_dilation=DELTA).fit(S_tr)
+                     grad_dilation=DELTA, budget=budget).fit(S_tr)
 
 
-def _mu_values(m, n_pts=13):
-    m._ensure_dirichlet()
-    E = np.asarray(m.dirichlet_nl_)
-    E = E[E > 0.0]
-    n = float(m.Psi_.shape[1])
-    lo = 1e-3 * n / float(np.quantile(E, 0.95))
-    hi = 1e6 * n / float(np.quantile(E, 0.05))
-    return np.concatenate([[0.0], np.logspace(np.log10(lo), np.log10(hi),
-                                              n_pts)])
+def _max_jac(m, S_hat):
+    return float(jnp.max(m.decoder_jacobian_norms(S_hat)))
 
 
-def mu_sweep(m, S_tr, S_va, S_te):
-    """Errors, certificate, and true max Jacobian norm vs mu.
-
-    Compares the diagonal surrogate (whose per-column shrinkage targets the
-    certificate directly, driving it monotonically to 1) with the exact
-    coupled penalty (which minimizes the TRUE empirical Jacobian norm --
-    tighter actual stability, but the triangle-inequality certificate cannot
-    see the cancellations it exploits and stays loose).
-    """
-    pts_dil = (1.0 + DELTA) * m.S_hat_
+def budget_sweep(S_tr, S_va, S_te):
+    """Fresh budget-aware fit per L; certificate holds by construction."""
     rows = []
-    for variant in ("surrogate", "exact"):
-        for mu in _mu_values(m):
-            if variant == "exact":
-                m.set_mu(0.0)
-                m.set_sparsity(0.0)
-                if mu > 0.0:
-                    m.polish_exact(float(mu))
-            else:
-                m.set_mu(float(mu))
-                m.set_sparsity(0.0)
-            maxJ = float(np.max(np.asarray(
-                m.decoder_jacobian_norms(pts_dil))))
-            rows.append(dict(
-                variant=variant, mu=float(mu),
-                train=m.reconstruction_error(S_tr),
-                val=m.reconstruction_error(S_va),
-                test=m.reconstruction_error(S_te),
-                cert=m.lipschitz_certificate(dilation=DELTA),
-                maxJ=maxJ,
-            ))
-            r = rows[-1]
-            print(f"  [{variant:9s}] mu={mu:9.2e} train={r['train']:.3e} "
-                  f"test={r['test']:.3e} L_hat={r['cert']:.3e} "
-                  f"max||J||={maxJ:.3e}")
+    for L in L_GRID:
+        m = _fit(S_tr, L)
+        probe = (1.0 + DELTA) * m.S_hat_
+        row = dict(
+            L=(None if np.isinf(L) else float(L)),
+            n_active=int(m.n_selected_nonlinear),
+            m_total=int(m.m_nl_),
+            cert=float(m.certificate_),
+            max_jac_dilated=_max_jac(m, probe),
+            train=m.reconstruction_error(S_tr),
+            val=m.reconstruction_error(S_va),
+            test=m.reconstruction_error(S_te))
+        rows.append(row)
+        print(f"  L={L:9.3g} act={row['n_active']:3d}/{row['m_total']} "
+              f"cert={row['cert']:9.3g} maxJ={row['max_jac_dilated']:9.3g} "
+              f"train={row['train']:.3e} test={row['test']:.3e}")
     return rows
 
 
-def certificate_check(m, S_te, mu_exact):
+def certificate_check(S_tr, S_te):
     """Certificate must upper-bound the pointwise Jacobian norms."""
-    m.set_mu(0.0); m.set_sparsity(0.0); m.polish_exact(mu_exact)
-    cert = m.lipschitz_certificate(dilation=DELTA)
-    pts_dil = (1.0 + DELTA) * m.S_hat_
-    pts_test = m.encode(S_te)
-    J_dil = np.asarray(m.decoder_jacobian_norms(pts_dil))
-    J_test = np.asarray(m.decoder_jacobian_norms(pts_test))
-    out = dict(mu=float(mu_exact), cert=float(cert),
-               max_J_dilated=float(J_dil.max()),
-               max_J_test=float(J_test.max()),
-               holds_dilated=bool(J_dil.max() <= cert * (1 + 1e-9)),
-               holds_test=bool(J_test.max() <= cert * (1 + 1e-9)))
-    print(f"  certificate L_hat={cert:.4g}; max||J|| dilated cloud="
-          f"{out['max_J_dilated']:.4g} (bounded: {out['holds_dilated']}), "
-          f"encoded test={out['max_J_test']:.4g} "
-          f"(bounded: {out['holds_test']})")
+    m = _fit(S_tr, 1e3)
+    probe = (1.0 + DELTA) * m.S_hat_
+    Sh_te = m.encode(S_te)
+    out = dict(cert=float(m.certificate_),
+               max_jac_dilated=_max_jac(m, probe),
+               max_jac_test=_max_jac(m, Sh_te),
+               n_active=int(m.n_selected_nonlinear))
+    ok = (out["max_jac_dilated"] <= out["cert"] * (1 + 1e-9))
+    print(f"  cert={out['cert']:.4g}  maxJ(dilated)={out['max_jac_dilated']:.4g} "
+          f"maxJ(test)={out['max_jac_test']:.4g}  valid={ok}")
+    out["valid_on_dilated"] = bool(ok)
     return out
 
 
-def budget_sweep(m, S_tr, S_te):
-    """enforce_budget drives the certificate below any prescribed L > 1."""
-    rows = []
-    cert0 = None
-    for L in (1e6, 1e4, 1e2, 3e1, 1e1, 3e0):
-        m.set_mu(0.0)
-        m.set_sparsity(0.0)
-        cert0 = m.lipschitz_certificate(dilation=DELTA) if cert0 is None else cert0
-        cert = m.enforce_budget(L, dilation=DELTA, mu0=1e-12, growth=10.0)
-        rows.append(dict(budget=float(L), mu=float(m.mu), cert=float(cert),
-                         train=m.reconstruction_error(S_tr),
-                         test=m.reconstruction_error(S_te),
-                         satisfied=bool(cert <= L)))
-        r = rows[-1]
-        print(f"  L={L:9.2e} -> mu={r['mu']:9.2e} L_hat={r['cert']:9.3e} "
-              f"train={r['train']:.3e} test={r['test']:.3e} "
-              f"ok={r['satisfied']}")
-    print(f"  (unregularized certificate: {cert0:.3e})")
-    return rows
+def plots(res):
+    rows = res["budget"]
+    L = [1e8 if e["L"] is None else e["L"] for e in rows]
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
+    ax = axes[0]
+    ax.loglog(L, [e["train"] for e in rows], "--s", color="#9467bd",
+              label="train")
+    ax.loglog(L, [e["test"] for e in rows], "-o", color="#d62728",
+              label="test")
+    ax.set_xlabel(r"prescribed budget $L$  ($10^8$ = unconstrained)")
+    ax.set_ylabel("relative reconstruction error")
+    ax.set_title("error vs budget")
+    ax.legend(); ax.grid(True, which="both", alpha=0.3)
 
-def plot_mu_sweep(rows):
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6))
-    for variant, color in (("surrogate", "#1f77b4"), ("exact", "#d62728")):
-        rs = [r for r in rows if r["variant"] == variant and r["mu"] > 0]
-        mus = [r["mu"] for r in rs]
-        axes[0].loglog(mus, [r["test"] for r in rs], "-o", color=color,
-                       label=f"test ({variant})")
-        axes[0].loglog(mus, [r["train"] for r in rs], "--s", color=color,
-                       alpha=0.6, label=f"train ({variant})")
-        axes[1].loglog(mus, [r["cert"] for r in rs], "-o", color=color,
-                       label=f"certificate ({variant})")
-        axes[1].loglog(mus, [r["maxJ"] for r in rs], "--s", color=color,
-                       alpha=0.6, label=r"max $\|J_\Gamma\|_2$" + f" ({variant})")
-    mu0 = [r for r in rows if r["variant"] == "surrogate" and r["mu"] == 0.0]
-    if mu0:
-        axes[0].axhline(mu0[0]["test"], color="gray", ls=":",
-                        label="test (mu=0)")
-        axes[1].axhline(mu0[0]["cert"], color="gray", ls=":",
-                        label="mu=0")
-    axes[0].set_xlabel(r"stability weight $\mu$")
-    axes[0].set_ylabel("relative reconstruction error")
-    axes[0].set_title("OOD error vs stability weight")
-    axes[1].set_xlabel(r"stability weight $\mu$")
-    axes[1].set_ylabel(r"$\widehat L_\Gamma(\delta)$ and max $\|J_\Gamma\|_2$")
-    axes[1].set_title("Certificate and true Jacobian norm vs stability weight")
-    for ax in axes:
-        ax.grid(True, which="both", alpha=0.3)
-        ax.legend(fontsize=9)
-    fig.suptitle("Advecting pulse — stability regularization "
-                 f"(r={R}, p={DEGREES}, all features active, "
-                 r"$\delta=$" + f"{DELTA})")
-    fig.tight_layout()
-    for ext in ("png", "pdf"):
-        fig.savefig(PLOTS / f"stability_mu_sweep.{ext}", dpi=160,
-                    bbox_inches="tight")
-    plt.close(fig)
-    print(f"    saved {PLOTS/'stability_mu_sweep.png'}/.pdf")
+    ax = axes[1]
+    ax.loglog(L, [e["cert"] for e in rows], "-o", color="#d62728",
+              label=r"certificate $\widehat L_\Gamma(\delta)$")
+    ax.loglog(L, [e["max_jac_dilated"] for e in rows], "--^",
+              color="#1f77b4", label=r"measured $\max_l\|J_\Gamma\|_2$")
+    Lf = [x for x in L if x < 1e8]
+    ax.loglog(Lf, Lf, ":", color="gray", label="identity ($=L$)")
+    ax.set_xlabel(r"prescribed budget $L$")
+    ax.set_title("certificate $\\leq L$ by construction")
+    ax.legend(); ax.grid(True, which="both", alpha=0.3)
 
+    ax = axes[2]
+    ax.semilogx(L, [e["n_active"] for e in rows], "-o", color="#2ca02c")
+    ax.axhline(rows[0]["m_total"], color="gray", ls=":", lw=1)
+    ax.set_xlabel(r"prescribed budget $L$")
+    ax.set_ylabel("admitted nonlinear features")
+    ax.set_title("dictionary usage vs budget")
+    ax.grid(True, which="both", alpha=0.3)
 
-def plot_budget(rows):
-    fig, ax1 = plt.subplots(figsize=(7, 4.6))
-    L = [r["budget"] for r in rows]
-    ax1.loglog(L, [r["cert"] for r in rows], "-o", color="#d62728",
-               label=r"certificate $\widehat L_\Gamma$")
-    ax1.loglog(L, L, ":", color="gray", label="budget $L$ (identity)")
-    ax1.set_xlabel("prescribed budget $L$")
-    ax1.set_ylabel(r"certificate $\widehat L_\Gamma(\delta)$", color="#d62728")
-    ax2 = ax1.twinx()
-    ax2.loglog(L, [r["test"] for r in rows], "-s", color="#1f77b4",
-               label="test error")
-    ax2.set_ylabel("relative test error", color="#1f77b4")
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, fontsize=9, loc="upper left")
-    ax1.grid(True, which="both", alpha=0.3)
-    ax1.set_title("Budget enforcement: "
-                  r"$\widehat L_\Gamma(\delta) \leq L$ via the outer $\mu$-loop")
+    fig.suptitle("Budget-constrained selection on the transport problem "
+                 f"(r={R}, p={DEGREES}, $\\gamma_{{sp}}=0$, "
+                 f"$\\delta$={DELTA})", fontsize=14)
     fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(PLOTS / f"stability_budget.{ext}", dpi=160,
@@ -225,31 +156,18 @@ def plot_budget(rows):
 
 def main(phase="all"):
     PLOTS.mkdir(exist_ok=True)
+    res = json.load(open(OUT_JSON)) if OUT_JSON.exists() else {}
     S_tr, S_va, S_te = _data()
-    print(f"[stability] transport d={S_tr.shape[0]} "
-          f"train {S_tr.shape[1]} / val {S_va.shape[1]} / test {S_te.shape[1]}")
-    m = _fit(S_tr)
-    out = json.load(open(OUT_JSON)) if OUT_JSON.exists() else {}
-
-    if phase in ("all", "mu"):
-        print("[stability] mu sweep (surrogate vs exact):")
-        out["mu_sweep"] = mu_sweep(m, S_tr, S_va, S_te)
-        plot_mu_sweep(out["mu_sweep"])
-
-    if phase in ("all", "certificate"):
+    if phase in ("all", "budget") and "budget" not in res:
+        print("[stability] budget sweep:")
+        res["budget"] = budget_sweep(S_tr, S_va, S_te)
+        json.dump(res, open(OUT_JSON, "w"), indent=1)
+    if phase in ("all", "certificate") and "certificate" not in res:
         print("[stability] certificate validity:")
-        rows = out.get("mu_sweep", [])
-        ex = [r for r in rows if r["variant"] == "exact" and r["mu"] > 0]
-        mu_star = (min(ex, key=lambda r: r["val"])["mu"] if ex else 1e2)
-        out["certificate"] = certificate_check(m, S_te, mu_star)
-
-    if phase in ("all", "budget"):
-        print("[stability] budget enforcement:")
-        out["budget"] = budget_sweep(m, S_tr, S_te)
-        plot_budget(out["budget"])
-
-    json.dump(out, open(OUT_JSON, "w"), indent=1)
-    print(f"[stability] saved {OUT_JSON}")
+        res["certificate"] = certificate_check(S_tr, S_te)
+        json.dump(res, open(OUT_JSON, "w"), indent=1)
+    if phase in ("all", "plots"):
+        plots(res)
 
 
 if __name__ == "__main__":

@@ -46,9 +46,8 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))                              # experiments/
 DATA_DIR = _HERE / "data"
 from exp_methods import (build_model, METHOD_NAMES, METHOD_STYLES,  # noqa: E402
-                         fit_opm_tuned, _OPM_METHODS, _OPM_DEGREES,
+                         _OPM_METHODS, _OPM_DEGREES,
                          _active_by_degree, _fit_opm_base, _grid_curves,
-                         _grid_curves_budget, _apply_budget_config,
                          _select_config, _select_variant, _apply_opm_params)
 from exp_plots import (error_vs_r,                                 # noqa: E402
                        active_features_table, active_features_bar)
@@ -72,9 +71,9 @@ CFG = dict(
     tau=1e-3,
     gamma_sp_points=24,   # gamma_sp grid resolution for the validation sweep
     gamma_sp_tol=0.02,    # config band: fewest features within 2% of best val
-    n_mu=14,              # mu grid resolution
     grad_dilation=0.1,    # OOD collar for the Dirichlet / certificate probes
-    budget=1e3,        # per-experiment Lipschitz budget L (from budget_study)
+    n_grad_samples=150,   # in-loop gradient-probe subsample (final pass = full cloud)
+    budget=316.0,        # per-experiment Lipschitz budget L (from budget_study)
     gamma_factors=(0.01, 0.1, 0.3, 1.0, 3.0, 10.0),  # ridge grid, multiples of n
 )
 # Full-data fits are expensive; allow a finite wall-clock budget so the sweep
@@ -186,7 +185,6 @@ def _staged_opm(key, res, V_tr, V_va, r, degrees):
     the selected variant and returns the model.  Mirrors
     ``exp_methods.fit_opm_tuned`` exactly.
     """
-    exact = CFG.get("exact_polish", False)
     n_points = CFG.get("gamma_sp_points", 24)
     tol = CFG.get("gamma_sp_tol", 0.02)
     stages = {}
@@ -196,21 +194,10 @@ def _staged_opm(key, res, V_tr, V_va, r, degrees):
         if skey not in res:
             tic = time.time()
             m = _fit_opm_base(V_tr, r, degrees, CFG, s_pool=s_pool)
-            L = CFG.get("budget")
-            if L is not None:
-                curves = _grid_curves_budget(m, V_tr, V_va, CFG, n_points,
-                                             sel, float(L))
-            else:
-                curves = _grid_curves(m, V_tr, V_va, CFG, n_points, exact,
-                                      sel)
+            curves = _grid_curves(m, V_tr, V_va, CFG, n_points, sel)
             best = _select_config(curves, tol)
-            if L is not None:                 # budget mode: mu varies per point
-                curve = next(c for c in curves
-                             if c and c[0].get("gamma") == best.get("gamma"))
-            else:
-                curve = next(c for c in curves
-                             if c and c[0]["mu"] == best["mu"]
-                             and c[0].get("gamma") == best.get("gamma"))
+            curve = next(c for c in curves
+                         if c and c[0].get("gamma") == best.get("gamma"))
             res[skey] = dict(best=best, curve=curve,
                              secs=round(time.time() - tic, 3))
             _save(res)
@@ -223,15 +210,10 @@ def _staged_opm(key, res, V_tr, V_va, r, degrees):
     _, curve, best = stages[best_sel]
     m = _fit_opm_base(V_tr, r, degrees, CFG,
                       s_pool=(r if best_sel == "leading" else None))
-    L = CFG.get("budget")
-    if L is not None:
-        _apply_budget_config(m, best, float(L))
-    else:
-        _apply_opm_params(m, best["gamma_sp"], best["mu"], exact,
-                          gamma=best.get("gamma"))
+    _apply_opm_params(m, best["gamma_sp"], gamma=best.get("gamma"))
     for sel in ("greedy", "leading"):
         res.pop(f"__stage:{key}:{sel}", None)
-    return (m, best["gamma_sp"], best["mu"], curve, best_sel,
+    return (m, best["gamma_sp"], curve, best_sel,
             best.get("gamma"), stage_secs)
 
 
@@ -256,12 +238,12 @@ def run_sweep(D, budget=TIME_BUDGET):
                     print(f"  r={r:2d} {nm:24s} [staged; rerun to continue]")
                     did = True
                     continue
-                model, gsp, mu, curve, sel, gam, stage_secs = out
+                model, gsp, curve, sel, gam, stage_secs = out
                 _block(model)
                 tic -= stage_secs             # include the staged tuning time
             else:
                 model = _block(build_model(nm, V_tr_j, r, CFG))
-                gsp, mu, curve, sel, gam = None, None, None, None, None
+                gsp, curve, sel, gam = None, None, None, None
             fit_secs = round(time.time() - tic, 3)     # fit + tuning wall time
             s_tr, o_tr = _metrics(model, D["V_tr"], D["Y_tr"], D["nrm"]["train"], C)
             s_va, o_va = _metrics(model, D["V_va"], D["Y_va"], D["nrm"]["val"], C)
@@ -276,7 +258,6 @@ def run_sweep(D, budget=TIME_BUDGET):
                             n_active=n_act,
                             n_active_by_degree=act_by_deg,
                             gamma_sp=(None if gsp is None else float(gsp)),
-                            mu=(None if mu is None else float(mu)),
                             gamma=(None if gam is None else float(gam)),
                             cert=(None if cert_val is None
                                   else float(cert_val)),
@@ -285,7 +266,8 @@ def run_sweep(D, budget=TIME_BUDGET):
                             fit_secs=fit_secs,
                             secs=round(time.time() - tic, 2))
             did = True
-            gtxt = f" gsp={gsp:.2e} mu={mu:.2e} sel={sel}" if gsp is not None else ""
+            ce = res[key].get("cert") if key in res else None
+            gtxt = (f" gsp={gsp:.2e} sel={sel}" if gsp is not None else "")
             print(f"  r={r:2d} {nm:24s} state(te)={s_te:.3e} out(te)={o_te:.3e} "
                   f"act={res[key]['n_active']:>3d}{gtxt} ({res[key]['secs']}s)")
             _save(res)
@@ -312,13 +294,14 @@ def timeseries(D, res):
     # Per-method y(t) cache so the phase is resumable under the 45s limit.
     ycache = PLOTS / "nse_timeseries_cache_full.npz"
     ymethods = dict(np.load(ycache)) if ycache.exists() else {}
-    for nm in METHOD_NAMES:
+    ts_methods = [m for m in METHOD_NAMES
+                  if m != "Greedy-OPM (p=[2,3,4])"]
+    for nm in ts_methods:
         if nm in ymethods:
             continue
         entry = res.get(f"{nm}@r={R_OUT}") or {}
         model = build_model(nm, V["tr"], R_OUT, CFG,
                             gamma_sp=entry.get("gamma_sp"),
-                            mu=entry.get("mu"),
                             sel=entry.get("sel") or "greedy",
                             gamma=entry.get("gamma"))
         yy = [C @ np.asarray(model.reconstruct(V[k])) for k in order]
@@ -332,7 +315,7 @@ def timeseries(D, res):
     for i in range(n_out):
         ax = axes[i]
         ax.plot(tfull, Ytrue[i], color="k", lw=2.4, label="Ground truth", zorder=10)
-        for nm in METHOD_NAMES:
+        for nm in ts_methods:
             st = METHOD_STYLES[nm]
             ls = "--" if "--" in st["fmt"] else "-"
             ax.plot(tfull, ymethods[nm][i], ls, color=st["color"],

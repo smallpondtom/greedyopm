@@ -5,7 +5,7 @@ Greedy-OPM (p=[2,3]) on an advecting Gaussian pulse.  Snapshots are split
 TEMPORALLY into the first 50% of timesteps (train), the next 25% (validation,
 near future) and the final 25% (test, far future), so the test set is a
 genuine forward-in-time extrapolation (see experiments/exp_split.py).  The
-validation window tunes the Greedy-OPM hyperparameters (gamma_sp, mu); the
+validation window tunes the Greedy-OPM hyperparameters (gamma, gamma_sp); the
 test window is held out for the reported errors.
 
 The r-sweep is resumable (checkpoint JSON); rerun until it prints DONE.  Once
@@ -64,9 +64,9 @@ CFG = dict(
     tau=1e-6,
     gamma_sp_points=24,   # gamma_sp grid resolution for the validation sweep
     gamma_sp_tol=0.02,    # within-tol selection (best train, then fewest features)
-    n_mu=14,              # mu grid resolution
-    grad_dilation=0.1,    # OOD collar for the Dirichlet / certificate probes
-    budget=1e5,        # per-experiment Lipschitz budget L (from budget_study)
+    grad_dilation=0.1,
+    n_grad_samples=150,   # in-loop gradient-probe subsample (final pass = full cloud)    # OOD collar for the Dirichlet / certificate probes
+    budget=100.0,        # per-experiment Lipschitz budget L (from budget_study)
     gamma_factors=(0.01, 0.1, 0.3, 1.0, 3.0, 10.0),  # ridge grid, multiples of n
 )
 TIME_BUDGET = 40.0    # per-call wall budget (sandbox 45s limit; sweep resumes)
@@ -133,11 +133,12 @@ def main(phase="all"):
                for sp, cols in disp.items()}
         recon = {"train": {}, "test": {}}
         rel = {"train": {}, "test": {}}
-        for nm in METHOD_NAMES:
+        field_methods = [m for m in METHOD_NAMES
+                         if m != "Greedy-OPM (p=[2,3,4])"]
+        for nm in field_methods:
             entry = results.get(f"{nm}@r={R_FIELD}") or {}
             model = build_model(nm, jnp.asarray(S_train), R_FIELD, CFG,
                                 gamma_sp=entry.get("gamma_sp"),
-                                mu=entry.get("mu"),
                                 sel=entry.get("sel") or "greedy",
                                 gamma=entry.get("gamma"))
             for split in ("train", "test"):
@@ -147,12 +148,12 @@ def main(phase="all"):
         for split, tag in [("train", "Training"), ("test", "Test")]:
             title = f"Advecting pulse — space-time reconstruction ({tag}, r={R_FIELD})"
             field_panels(
-                Sd[split], recon[split], METHOD_NAMES,
+                Sd[split], recon[split], field_methods,
                 str(PLOTS / f"transport_field_{split}"), title,
                 cmap="viridis", extent=ext[split], xlabel="time $t$",
                 ylabel="space $x$", aspect="auto", rel_errs=rel[split])
             field_panels_horizontal(
-                Sd[split], recon[split], METHOD_NAMES,
+                Sd[split], recon[split], field_methods,
                 str(PLOTS / f"transport_field_{split}_horizontal"), title,
                 cmap="viridis", extent=ext[split], xlabel="time $t$",
                 ylabel="space $x$", aspect="auto", rel_errs=rel[split])

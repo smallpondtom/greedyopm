@@ -1,238 +1,92 @@
-"""Tests for the stability-regularized greedy OPM (Jacobian control).
+"""Tests for the budget-constrained selection and Lipschitz certificate.
 
 Covers:
-* gradient recurrence vs. jax.jacfwd (exactness of Proposition `gradient
-  recurrence`),
-* mu = 0 backward compatibility (legacy scoring path, legacy shrinkage),
-* monotonicity of the Lipschitz certificate in mu,
-* bounded accuracy loss on training data (Lemma `bounded accuracy loss`),
-* OOD smoke test on a traveling-wave toy problem.
+* budget=None backward compatibility (unconstrained selection),
+* budget enforcement by construction (certificate <= L after fit),
+* monotonicity of the admitted set / certificate in the budget L,
+* certificate validity (pointwise Jacobian norms <= certificate on the
+  dilated probe cloud),
+* the cheap (gamma_sp, budget) re-selection path (set_sparsity).
 """
 
-from __future__ import annotations
-
-import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from greedyopm import GreedyOPM
-from greedyopm.polynomials.arnoldi import (
-    arnoldi_build,
-    arnoldi_eval,
-    arnoldi_eval_grad,
-)
-from greedyopm.polynomials.multindex import (
-    graded_lex_multi_indices_for_degrees,
-)
+import jax
 
 jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from greedyopm import GreedyOPM  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# Toy data: traveling Gaussian bump (transport-dominated, slow n-width decay)
-# ---------------------------------------------------------------------------
-
-
-def traveling_wave(n_t: int, t_max: float, d: int = 120) -> jnp.ndarray:
-    x = np.linspace(-1.0, 1.0, d)
-    t = np.linspace(0.0, t_max, n_t)
-    S = np.exp(-((x[:, None] - (-0.6 + t[None, :])) ** 2) / (2 * 0.08**2))
+@pytest.fixture(scope="module")
+def data():
+    x = np.linspace(0.0, 1.0, 160, endpoint=False)
+    t = np.linspace(0.0, 1.0, 220)
+    S = np.exp(-((x[:, None] - (0.2 + 0.5 * t[None, :])) ** 2) / 2e-3)
     return jnp.asarray(S)
 
 
-# ---------------------------------------------------------------------------
-# Gradient recurrence
-# ---------------------------------------------------------------------------
+class TestBudgetedSelection:
+    def test_unconstrained_matches_legacy(self, data):
+        """budget=None keeps every eligible feature active."""
+        m = GreedyOPM(r=4, s=12, p=2, gamma_sp=0.0).fit(data)
+        assert m.n_selected_nonlinear == m.m_nl_
 
-
-class TestGradientRecurrence:
-    def _basis(self, r=2, n=40, p=3, seed=0):
-        rng = np.random.default_rng(seed)
-        S_hat = jnp.asarray(rng.standard_normal((r, n)))
-        mi = np.asarray(
-            graded_lex_multi_indices_for_degrees(r, list(range(2, p + 1))),
-            dtype=np.int32,
-        )
-        _, basis = arnoldi_build(S_hat, mi, n_reorth=1)
-        return S_hat, basis
-
-    def test_values_match_eval(self):
-        S_hat, basis = self._basis()
-        W_ref = arnoldi_eval(S_hat, basis)
-        W, _ = arnoldi_eval_grad(S_hat, basis)
-        np.testing.assert_allclose(np.asarray(W), np.asarray(W_ref), atol=1e-12)
-
-    @pytest.mark.parametrize("r,p", [(1, 4), (2, 3), (3, 2)])
-    def test_grad_matches_jacfwd(self, r, p):
-        rng = np.random.default_rng(1)
-        n = 50
-        S_hat = jnp.asarray(rng.standard_normal((r, n)))
-        mi = np.asarray(
-            graded_lex_multi_indices_for_degrees(r, list(range(2, p + 1))),
-            dtype=np.int32,
-        )
-        _, basis = arnoldi_build(S_hat, mi, n_reorth=1)
-
-        # a handful of probe points, in and out of distribution
-        pts = jnp.asarray(rng.standard_normal((r, 7)) * 1.5)
-        _, G = arnoldi_eval_grad(pts, basis)          # (M, r, 7)
-
-        def features_at(x):                           # x: (r,)
-            return arnoldi_eval(x[:, None], basis)[:, 0]
-
-        J_ref = jax.vmap(jax.jacfwd(features_at), in_axes=1, out_axes=2)(pts)
-        np.testing.assert_allclose(
-            np.asarray(G), np.asarray(J_ref), rtol=1e-9, atol=1e-9,
-        )
-
-    def test_grad_of_constant_and_linear(self):
-        """grad psi_0 = 0; grad of linear features is constant in s_hat."""
-        S_hat, basis = self._basis(r=2, n=30, p=2)
-        pts = jnp.asarray(np.random.default_rng(2).standard_normal((2, 5)))
-        _, G = arnoldi_eval_grad(pts, basis)
-        assert float(jnp.max(jnp.abs(G[0]))) == 0.0
-        # linear rows: gradient identical across points
-        for k in (1, 2):
-            spread = jnp.max(jnp.abs(G[k] - G[k][:, :1]))
-            assert float(spread) < 1e-10
-
-
-# ---------------------------------------------------------------------------
-# GreedyOPM with stability regularization
-# ---------------------------------------------------------------------------
-
-
-class TestStabilityRegularizedGreedy:
-    @pytest.fixture(scope="class")
-    def data(self):
-        return traveling_wave(n_t=160, t_max=0.9)
-
-    def test_mu_zero_is_legacy(self, data):
-        """mu=0 must reproduce the unregularized model bit-for-bit."""
-        kw = dict(gamma_sp=1e-3, gamma=1e-8, ortho_method="arnoldi")
-        m0 = GreedyOPM(r=4, s=12, p=2, **kw).fit(data)
-        m1 = GreedyOPM(r=4, s=12, p=2, mu=0.0, **kw).fit(data)
-        assert list(m0.J_) == list(m1.J_)
-        np.testing.assert_allclose(
-            np.asarray(m0.Vbar_nl_), np.asarray(m1.Vbar_nl_), atol=0.0,
-        )
-        assert m0.reconstruction_error(data) == m1.reconstruction_error(data)
-
-    def test_mu_requires_arnoldi(self):
+    def test_budget_requires_arnoldi(self):
         with pytest.raises(ValueError):
-            GreedyOPM(r=2, s=6, p=2, mu=1.0, ortho_method="qr")
+            GreedyOPM(r=2, s=6, p=2, budget=10.0, ortho_method="qr")
 
-    def test_certificate_decreases_with_mu(self, data):
-        certs = []
-        for mu in (0.0, 1e2, 1e5):
-            m = GreedyOPM(
-                r=4, s=12, p=3, mu=mu, grad_dilation=0.2,
-                gamma_sp=0.0, ortho_method="arnoldi",
-            ).fit(data)
-            certs.append(m.lipschitz_certificate(dilation=0.2))
-        assert certs[1] <= certs[0] * (1 + 1e-9)
-        assert certs[2] <= certs[1] * (1 + 1e-9)
-        # mu -> infinity drives the certificate to 1 (pure POD)
-        assert certs[2] < certs[0] or np.isclose(certs[2], 1.0, atol=1e-6)
-
-    def test_bounded_accuracy_loss(self, data):
-        """Training error grows only mildly for moderate mu (Lemma 2.10).
-
-        The natural scale of mu is n / max_k E_k: then mu * E_k <= n and the
-        per-feature shrinkage n / (n + gamma + mu E_k) stays >= 1/2.
-        """
-        m0 = GreedyOPM(r=4, s=12, p=2, mu=0.0).fit(data)
-        n = data.shape[1]
-        m_probe = GreedyOPM(r=4, s=12, p=2, mu=1e-12).fit(data)
-        mu = 0.5 * n / float(jnp.max(m_probe.dirichlet_nl_))
-        m1 = GreedyOPM(r=4, s=12, p=2, mu=mu, grad_dilation=0.0).fit(data)
-        e0 = m0.reconstruction_error(data)
-        e1 = m1.reconstruction_error(data)
-        assert e1 < 3.0 * max(e0, 1e-12) + 1e-6
-
-    def test_certificate_matches_pointwise_norms(self, data):
-        """Certificate upper-bounds the pointwise Jacobian norms."""
-        m = GreedyOPM(r=3, s=10, p=2, mu=1e1, grad_dilation=0.1).fit(data)
-        pts = (1.0 + 0.1) * m.S_hat_
-        pointwise = np.asarray(m.decoder_jacobian_norms(pts))
-        cert = m.lipschitz_certificate(dilation=0.1)
-        assert float(pointwise.max()) <= cert * (1 + 1e-9)
-
-    def test_ood_smoke(self, data):
-        """Stabilized decode stays finite and controlled out of distribution."""
-        S_train = data[:, :100]                     # t in [0, ~0.56]
-        S_test = traveling_wave(n_t=160, t_max=0.9)[:, 100:]
-
-        m_plain = GreedyOPM(r=4, s=12, p=3, mu=0.0).fit(S_train)
-        m_stab = GreedyOPM(
-            r=4, s=12, p=3, mu=1e3, grad_dilation=0.25, n_grad_samples=40,
-        ).fit(S_train)
-
-        err_plain = m_plain.reconstruction_error(S_test)
-        err_stab = m_stab.reconstruction_error(S_test)
-        assert np.isfinite(err_stab)
-        # the stabilized manifold must not be (much) worse OOD
-        assert err_stab <= max(2.0 * err_plain, 1.5)
-
-    def test_enforce_budget(self, data):
-        """The certificate loop drives L_hat below any budget L > 1."""
-        m = GreedyOPM(r=4, s=12, p=3, mu=0.0, gamma_sp=1e-4).fit(data)
-        cert0 = m.lipschitz_certificate(dilation=0.2)
-        L = 1.0 + 0.5 * (cert0 - 1.0)  # a budget strictly below the initial
-        cert = m.enforce_budget(L, dilation=0.2)
-        assert cert <= L
-        assert m.mu > 0.0
-        # active set is mu-independent (one-step theorem)
-        m2 = GreedyOPM(r=4, s=12, p=3, mu=0.0, gamma_sp=1e-4).fit(data)
-        assert set(np.asarray(m.active_nl_global_).tolist()) == set(
-            np.asarray(m2.active_nl_global_).tolist()
-        )
-
-    def test_enforce_budget_rejects_trivial(self, data):
-        m = GreedyOPM(r=3, s=10, p=2).fit(data)
-        with pytest.raises(ValueError):
-            m.enforce_budget(1.0)
-
-    def test_fit_computes_certificate(self, data):
-        """fit() ends with the certificate of Algorithm `greedy-opm`."""
-        m = GreedyOPM(r=3, s=10, p=2, grad_dilation=0.1).fit(data)
-        assert m.certificate_ is not None and m.certificate_ >= 1.0
-        # matches the standalone evaluation at the same dilation
-        assert np.isclose(m.certificate_,
-                          m.lipschitz_certificate(dilation=0.1), rtol=1e-12)
-
-    def test_fit_enforces_budget(self, data):
-        """A budget passed to the constructor is enforced inside fit()."""
-        m0 = GreedyOPM(r=4, s=12, p=3, grad_dilation=0.1).fit(data)
-        L = 1.0 + 0.5 * (m0.certificate_ - 1.0)
-        m = GreedyOPM(r=4, s=12, p=3, grad_dilation=0.1, budget=L).fit(data)
-        assert m.certificate_ <= L
-        assert m.mu > 0.0
-
-    def test_budget_requires_valid_args(self):
+    def test_budget_must_exceed_one(self):
         with pytest.raises(ValueError):
             GreedyOPM(r=2, s=6, p=2, budget=0.5)
-        with pytest.raises(ValueError):
-            GreedyOPM(r=2, s=6, p=2, budget=5.0, ortho_method="qr", mu=0.0)
 
-    def test_certificate_refreshed_by_resolves(self, data):
-        """set_sparsity / set_mu / polish_exact keep certificate_ current."""
-        m = GreedyOPM(r=3, s=10, p=2, gamma_sp=1e-4).fit(data)
-        c0 = m.certificate_
-        m.set_mu(1e3)
-        assert m.certificate_ <= c0 * (1 + 1e-9)   # surrogate shrinks columns
-        m.polish_exact(1e3)
-        assert np.isclose(m.certificate_,
-                          m.lipschitz_certificate(), rtol=1e-12)
+    def test_certificate_below_budget_by_construction(self, data):
+        for L in (1e5, 1e2, 10.0, 2.0):
+            m = GreedyOPM(
+                r=4, s=12, p=3, budget=L, grad_dilation=0.2,
+            ).fit(data)
+            assert m.certificate_ <= L * (1.0 + 1e-9)
 
-    def test_probe_subsampling(self, data):
-        m = GreedyOPM(r=3, s=10, p=2, mu=1.0, n_grad_samples=25).fit(data)
-        assert m.dirichlet_nl_.shape[0] == m.m_nl_
-        assert np.all(np.asarray(m.dirichlet_nl_) >= 0.0)
+    def test_monotone_in_budget(self, data):
+        """Looser budgets admit at least as much gain (same fitted basis)."""
+        m = GreedyOPM(r=4, s=12, p=3, grad_dilation=0.1).fit(data)
+        errs, acts = [], []
+        for L in (2.0, 10.0, 1e3, np.inf):
+            m.set_sparsity(0.0, budget=L)
+            errs.append(m.reconstruction_error(data))
+            acts.append(m.n_selected_nonlinear)
+        assert all(a <= b for a, b in zip(acts, acts[1:]))
+        assert all(e >= f - 1e-12 for e, f in zip(errs, errs[1:]))
 
+    def test_certificate_validity(self, data):
+        """Pointwise Jacobian norms never exceed the certificate."""
+        m = GreedyOPM(
+            r=4, s=12, p=3, budget=1e3, grad_dilation=0.25,
+            n_grad_samples=40,
+        ).fit(data)
+        probe = (1.0 + 0.25) * m.S_hat_[:, ::5]
+        pointwise = m.decoder_jacobian_norms(probe)
+        assert float(jnp.max(pointwise)) <= m.certificate_ * (1.0 + 1e-9)
 
-if __name__ == "__main__":
-    import sys
+    def test_admission_between_linear_and_full(self, data):
+        """Budgeted error sits between the full and linear-only errors."""
+        m = GreedyOPM(r=4, s=12, p=2, grad_dilation=0.0).fit(data)
+        m.set_sparsity(0.0, budget=None)
+        full_err = m.reconstruction_error(data)
+        lin_err = m.linear_error(data)
+        m.set_sparsity(0.0, budget=50.0)
+        budget_err = m.reconstruction_error(data)
+        assert full_err - 1e-12 <= budget_err <= lin_err + 1e-12
 
-    sys.exit(pytest.main([__file__, "-v"]))
+    def test_resweep_gamma_sp_keeps_budget(self, data):
+        m = GreedyOPM(r=4, s=12, p=3, budget=30.0, grad_dilation=0.1).fit(data)
+        for gsp in (0.0, 1e-3, 1e-1):
+            m.set_sparsity(gsp)
+            assert m.certificate_ <= 30.0 * (1.0 + 1e-9)

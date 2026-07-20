@@ -7,7 +7,7 @@ Greedy-OPM (p=[2,3]).  Snapshots are split TEMPORALLY into the first 50% of
 timesteps (train), the next 25% (validation, near future) and the final 25%
 (test, far future), so the test set is a genuine forward-in-time
 extrapolation (see experiments/exp_split.py).  The validation window tunes
-the Greedy-OPM hyperparameters (gamma_sp, mu); the test window is held out
+the Greedy-OPM hyperparameters (gamma, gamma_sp); the test window is held out
 for the reported errors.
 
 The state modelled is the height field h (d = N^2); the dispersing concentric
@@ -67,9 +67,9 @@ CFG = dict(
     gamma_sp_points=24,    # gamma_sp grid resolution for the validation sweep
     gamma_sp_tol=0.005,    # config band: fewest features within 0.5% of best val
     variant_tol=0.08,      # prefer leading modes unless greedy val-gain > 8%
-    n_mu=14,               # mu grid resolution
     gamma_factors=(0.01, 0.1, 0.3, 1.0, 3.0, 10.0),   # ridge grid, multiples of n
     grad_dilation=0.1,     # OOD collar for the Dirichlet / certificate probes
+    n_grad_samples=150,   # in-loop gradient-probe subsample (final pass = full cloud)
     budget=3.0,        # per-experiment Lipschitz budget L (from budget_study)
 )
 TIME_BUDGET = 30.0    # per-call wall budget (sandbox 45s limit; sweep resumes)
@@ -135,11 +135,17 @@ def main(phase="all"):
         recon = {"train": {}, "test": {}}
         rel = {"train": {}, "test": {}}
         truth = {sp: np.asarray(S[:, c]).reshape(N, N) for sp, c in col.items()}
-        for nm in METHOD_NAMES:
+        # Per-snapshot errors use the SAME normalization as the error-vs-r
+        # curves: relative to the CENTERED field ||s - s_ref|| (the sloshing
+        # fluctuations), not the raw ||s|| whose mean-height background
+        # (h ~ 1) would deflate the numbers by an order of magnitude.
+        s_ref_np = np.asarray(S_train).mean(axis=1)
+        field_methods = [m for m in METHOD_NAMES
+                         if m != "Greedy-OPM (p=[2,3,4])"]
+        for nm in field_methods:
             entry = results.get(f"{nm}@r={R_FIELD}") or {}
             model = build_model(nm, jnp.asarray(S_train), R_FIELD, CFG,
                                 gamma_sp=entry.get("gamma_sp"),
-                                mu=entry.get("mu"),
                                 sel=entry.get("sel") or "greedy",
                                 gamma=entry.get("gamma"))
             for split, c in col.items():
@@ -147,7 +153,7 @@ def main(phase="all"):
                 approx = np.asarray(model.reconstruct(jnp.asarray(S[:, c:c + 1])))[:, 0]
                 recon[split][nm] = approx.reshape(N, N)
                 rel[split][nm] = float(np.linalg.norm(approx - truth_col)
-                                       / np.linalg.norm(truth_col))
+                                       / np.linalg.norm(truth_col - s_ref_np))
         for split, tag in [("train", "Training"), ("test", "Test")]:
             tcol = tspan[col[split]]
             title = (f"Shallow water height $h(x,y)$ — {tag} snapshot "
@@ -155,14 +161,14 @@ def main(phase="all"):
             # vertical (per-method) panel: narrower figure -> square cells, less
             # horizontal whitespace for the equal-aspect height field.
             field_panels(
-                truth[split], recon[split], METHOD_NAMES,
+                truth[split], recon[split], field_methods,
                 str(PLOTS / f"swe_field_{split}"), title,
                 cmap="viridis", extent=ext, xlabel="$x$", ylabel="$y$",
                 aspect="equal", rel_errs=rel[split],
                 figsize=(6.5, 3.0 * (len(METHOD_NAMES) + 1)))
             # horizontal panel: tightly packed columns (one per method)
             field_panels_horizontal(
-                truth[split], recon[split], METHOD_NAMES,
+                truth[split], recon[split], field_methods,
                 str(PLOTS / f"swe_field_{split}_horizontal"), title,
                 cmap="viridis", extent=ext, xlabel="$x$", ylabel="$y$",
                 aspect="equal", rel_errs=rel[split], axes_pad=(0.05, 0.30))

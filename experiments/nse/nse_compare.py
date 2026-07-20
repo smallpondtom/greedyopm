@@ -5,7 +5,7 @@ Greedy-OPM (p=[2,3]) on the compressed velocity snapshots.  The snapshots are
 split TEMPORALLY (first 50% train / next 25% validation / final 25% test, see
 experiments/exp_split.py and nse/prep_nse.py), so the test window is a
 genuine forward-in-time extrapolation.  The validation window tunes the
-Greedy-OPM hyperparameters (gamma_sp, mu, mode-selection variant); the test
+Greedy-OPM hyperparameters (gamma, gamma_sp, mode-selection variant); the test
 window is held out for the reported errors.  Reports the full-state relative
 reconstruction error (the K-POD floor is folded back in) and the
 sensor-output relative error, and plots the sensor outputs y(t) = C x for
@@ -56,9 +56,9 @@ CFG = dict(
     tau=1e-3,
     gamma_sp_points=24,   # gamma_sp grid resolution for the validation sweep
     gamma_sp_tol=0.02,    # within-tol selection (best train, then fewest feats)
-    n_mu=14,              # mu grid resolution
     grad_dilation=0.1,    # OOD collar for the Dirichlet / certificate probes
-    budget=1e3,        # per-experiment Lipschitz budget L (from budget_study)
+    n_grad_samples=150,   # in-loop gradient-probe subsample (final pass = full cloud)
+    budget=316.0,        # per-experiment Lipschitz budget L (from budget_study)
     gamma_factors=(0.01, 0.1, 0.3, 1.0, 3.0, 10.0),  # ridge grid, multiples of n
 )
 TIME_BUDGET = 30.0
@@ -107,17 +107,16 @@ def run_sweep(D, budget=33.0):
                 _save(res); print("[budget] pausing; rerun to continue"); return res, False
             tic = time.time()
             if nm in _OPM_METHODS:
-                model, gsp, mu, _, sel, gam = fit_opm_tuned(
+                model, gsp, _, sel, gam = fit_opm_tuned(
                     jnp.asarray(A_tr), jnp.asarray(A_va), r,
                     _OPM_DEGREES[nm], CFG)
             else:
-                model, gsp, mu, sel, gam = (
+                model, gsp, sel, gam = (
                     build_model(nm, jnp.asarray(A_tr), r, CFG),
-                    None, None, None, None)
+                    None, None, None)
             fit_secs = round(time.time() - tic, 3)     # fit + tuning wall time
             entry = dict(method=nm, r=int(r), n_active=_n_active(model),
                          gamma_sp=(None if gsp is None else float(gsp)),
-                         mu=(None if mu is None else float(mu)),
                          gamma=(None if gam is None else float(gam)),
                          cert=(None if getattr(model, "certificate_", None)
                                is None else float(model.certificate_)), sel=sel,
@@ -129,7 +128,9 @@ def run_sweep(D, budget=33.0):
             entry["secs"] = round(time.time() - tic, 2)
             res[key] = entry
             did = True
-            stxt = f" gsp={gsp:.2e} mu={mu:.2e} sel={sel}" if gsp is not None else ""
+            ce = entry.get("cert")
+            stxt = (f" gsp={gsp:.2e} cert={ce:.3g} sel={sel}"
+                    if gsp is not None else "")
             print(f"  r={r:2d} {nm:24s} state(tr)={entry['state_train']:.3e} "
                   f"state(te)={entry['state_test']:.3e} "
                   f"act={entry['n_active']:>3d}{stxt} ({entry['secs']}s)")
@@ -155,13 +156,14 @@ def timeseries(D, res):
     # Per-method y(t) cache so the phase is resumable under the 45s limit.
     ycache = PLOTS / "nse_timeseries_cache.npz"
     ymethods = dict(np.load(ycache)) if ycache.exists() else {}
-    for nm in METHOD_NAMES:
+    ts_methods = [m for m in METHOD_NAMES
+                  if m != "Greedy-OPM (p=[2,3,4])"]
+    for nm in ts_methods:
         if nm in ymethods:
             continue
         entry = res.get(f"{nm}@r={R_OUT}") or {}
         model = build_model(nm, A["train"], R_OUT, CFG,
                             gamma_sp=entry.get("gamma_sp"),
-                            mu=entry.get("mu"),
                             sel=entry.get("sel") or "greedy",
                             gamma=entry.get("gamma"))
         yy = [y_ref[:, None] + C_red @ np.asarray(model.reconstruct(A[k]))
@@ -177,7 +179,7 @@ def timeseries(D, res):
     for i in range(n_out):
         ax = axes[i]
         ax.plot(tfull, Ytrue[i], color="k", lw=2.4, label="Ground truth", zorder=10)
-        for nm in METHOD_NAMES:
+        for nm in ts_methods:
             st = METHOD_STYLES[nm]
             ls = "--" if "--" in st["fmt"] else "-"
             ax.plot(tfull, ymethods[nm][i], ls, color=st["color"],

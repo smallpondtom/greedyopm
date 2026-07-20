@@ -61,8 +61,9 @@ CFG = dict(
     tau=1e-3,
     gamma_sp_points=24,
     gamma_sp_tol=0.02,
-    n_mu=14,
     grad_dilation=0.1,
+    n_grad_samples=150,
+    budget=316.0,      # per-experiment Lipschitz budget L (from budget_study)
 )
 
 
@@ -113,7 +114,46 @@ def vertex_speed(spd_node, node_xy, verts):
 
 # ---------------------------------------------------------------------------
 
+def _fit_stage(method, g, r, rcache):
+    """Stage 1 of 2: fit on the compressed coordinates only (no mesh work).
+
+    Uses data/nse_compressed.npz (same lossless training-POD compression as
+    prep_nse.py), so this call never touches a d-dimensional object; the
+    reconstructed reduced snapshot ``ahat`` is cached for the plot stage.
+    """
+    import json
+    D = np.load(_HERE / "data" / "nse_compressed.npz")
+    from exp_split import split_indices
+    n_tot = (D["A_train"].shape[1] + D["A_val"].shape[1]
+             + D["A_test"].shape[1])
+    itr, iva, ite = split_indices(n_tot, train_frac=0.7, val_frac=0.15)
+    if g in set(ite.tolist()):
+        a_col = D["A_test"][:, g - ite[0]]
+    elif g in set(iva.tolist()):
+        a_col = D["A_val"][:, g - iva[0]]
+    else:
+        a_col = D["A_train"][:, g - itr[0]]
+    entry = {}
+    if CKPT.exists():
+        entry = (json.load(open(CKPT)).get(f"{method}@r={r}") or {})
+    print(f"[field] building {method} at r={r} "
+          f"(gsp={entry.get('gamma_sp')}, cert={entry.get('cert')}, "
+          f"sel={entry.get('sel')}) ...")
+    model = build_model(method, jnp.asarray(D["A_train"]), r, CFG,
+                        gamma_sp=entry.get("gamma_sp"),
+                        sel=entry.get("sel") or "greedy",
+                        gamma=entry.get("gamma"))
+    ahat = np.asarray(model.reconstruct(jnp.asarray(a_col[:, None])))[:, 0]
+    PLOTS.mkdir(parents=True, exist_ok=True)
+    np.savez(rcache, ahat=ahat)
+    print("[field] cached reconstruction; rerun to draw the figure")
+
+
 def main(method=METHOD, g=SNAP_INDEX, r=R_FIELD):
+    rcache = PLOTS / f"nse_field_recon_r{r}_g{g}.npz"
+    if not rcache.exists():
+        _fit_stage(method, g, r, rcache)
+        return
     if not COORDS.exists():
         sys.exit(f"missing {COORDS}")
     coords_int = np.load(COORDS)             # (41682, 2) in stored DOF ordering
@@ -148,22 +188,10 @@ def main(method=METHOD, g=SNAP_INDEX, r=R_FIELD):
     A_train = sig[:, None] * W.T                           # (K, n_train)
     print(f"[field] K={K}")
 
-    # ---- reduced coordinate of snapshot g and Greedy-OPM reconstruction
+    # ---- reconstruction of snapshot g from the cached reduced snapshot
     truth_int = V[:, g]
-    a_col = Q.T @ (truth_int - s_ref[:, 0])                # (K,)
-    import json
-    entry = {}
-    if CKPT.exists():
-        entry = (json.load(open(CKPT)).get(f"{method}@r={r}") or {})
-    print(f"[field] building {method} at r={r} "
-          f"(gsp={entry.get('gamma_sp')}, mu={entry.get('mu')}, "
-          f"sel={entry.get('sel')}) ...")
-    model = build_model(method, jnp.asarray(A_train), r, CFG,
-                        gamma_sp=entry.get("gamma_sp"),
-                        mu=entry.get("mu"),
-                        sel=entry.get("sel") or "greedy",
-                        gamma=entry.get("gamma"))
-    ahat = np.asarray(model.reconstruct(jnp.asarray(a_col[:, None])))[:, 0]
+    ahat = np.load(rcache)["ahat"]
+    print(f"[field] using cached reconstruction {rcache.name}")
     rec_int = s_ref[:, 0] + Q @ ahat
 
     rel = np.linalg.norm(rec_int - truth_int) / np.linalg.norm(truth_int)

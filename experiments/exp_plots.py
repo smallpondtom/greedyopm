@@ -31,10 +31,14 @@ def error_vs_r(results, rs, methods, out_prefix, suptitle):
     fig, axes = plt.subplots(1, 2, figsize=(20, 7.5), sharey=True)
     for ax, split, sub in zip(axes, ["train", "test"], ["Training", "Test"]):
         for name in methods:
-            ys = [results[f"{name}@r={r}"][split] for r in rs]
+            pts = [(r, results[f"{name}@r={r}"][split]) for r in rs
+                   if f"{name}@r={r}" in results]
+            if not pts:
+                continue
             st = METHOD_STYLES[name]
-            ax.semilogy(rs, ys, st["fmt"], label=name, color=st["color"],
-                        lw=st["lw"], ms=st["ms"])
+            ax.semilogy([p[0] for p in pts], [p[1] for p in pts], st["fmt"],
+                        label=name, color=st["color"], lw=st["lw"],
+                        ms=st["ms"])
         ax.set_title(f"{sub} data", fontsize=20, pad=8)
         ax.set_xlabel(r"Reduced dimension $r$", fontsize=18)
         ax.set_xticks(rs)
@@ -147,7 +151,7 @@ def active_features_bar(results, rs, methods, out_prefix, suptitle):
             handles.append(Patch(facecolor=col_c, edgecolor="white",
                                  hatch="///", label=f"{name} — cubic"))
         else:
-            ys = [_active_count(results, name, r) for r in rs]
+            ys = [(_active_count(results, name, r) or 0) for r in rs]
             bars = ax.bar(xpos, ys, width, color=st["color"],
                           edgecolor="white", lw=0.5)
             ax.bar_label(bars, fontsize=8, padding=1)

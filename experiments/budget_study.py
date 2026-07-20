@@ -38,15 +38,16 @@ sys.path.insert(0, str(_HERE / "transport"))
 sys.path.insert(0, str(_HERE.parent / "src"))
 
 from exp_split import split_indices                    # noqa: E402
-from exp_methods import (_fit_opm_base, _grid_curves_budget,   # noqa: E402
-                         _apply_budget_config, _select_config,
-                         _select_variant)
+from exp_methods import (fit_opm_tuned,                # noqa: E402
+                         _fit_opm_base, _grid_curves, _select_config,
+                         _select_variant, _apply_opm_params)
 
 PLOTS = _HERE / "plots"
 OUT_JSON = PLOTS / "budget_study.json"
 
 L_GRID = [1.5, 3.0, 10.0, 30.0, 100.0, 316.0, 1e3, 1e4, 1e5, 1e6, np.inf]
-L_TOL = 0.02          # smallest L whose val error is within 2% of the best
+L_TOL = 0.02
+WALL_BUDGET = float(__import__('os').environ.get('BS_BUDGET', '32'))          # smallest L whose val error is within 2% of the best
 DEGREE_SETS = {"p2": [2], "p23": [2, 3]}
 
 # featured reduced dimension and tuning grids per experiment
@@ -82,42 +83,59 @@ def _load(exp):
     return tuple(jnp.asarray(b) for b in blocks), cfg
 
 
-def study(exp, only_deg=None):
-    (S_tr, S_va, S_te), cfg = _load(exp)
+def study_one(exp, deg, L, blocks, cfg, out, key):
+    """One (experiment, degree-set, budget) cell: full budget-aware fit+tune.
+
+    The in-loop greedy mode selection runs under the budget L (knapsack
+    admission per candidate), and (gamma, gamma_sp, variant) are tuned on
+    the validation window -- identical to the main comparison protocol.
+    STAGED per variant (checkpointed under ``__stage:`` keys) so each
+    sandbox call fits at most one greedy variant; returns None while staging.
+    """
+    (S_tr, S_va, S_te) = blocks
     p = EXPS[exp]
     r = p["r"]
-    rows = []
-    for tag, degs in DEGREE_SETS.items():
-        if only_deg is not None and tag != only_deg:
-            continue
-        fits = {}
-        for sel, sp in (("greedy", None), ("leading", r)):
-            fits[sel] = _fit_opm_base(S_tr, r, degs, cfg, s_pool=sp)
-        for L in L_GRID:
-            per_variant = {}
-            for sel, m in fits.items():
-                curves = _grid_curves_budget(
-                    m, S_tr, S_va, cfg, cfg.get("gamma_sp_points", 24),
-                    sel, float(L))
-                per_variant[sel] = (m, curves, _select_config(curves,
-                                                              p["tol"]))
-            best_sel = _select_variant(per_variant, p["variant_tol"])
-            m, _, best = per_variant[best_sel]
-            _apply_budget_config(m, best, float(L))
-            rows.append(dict(
-                exp=exp, deg=tag, r=r, L=(None if np.isinf(L) else float(L)),
-                sel=best_sel, n_active=int(m.n_selected_nonlinear),
-                mu=float(m.mu), cert=float(m.certificate_),
-                gamma=float(best["gamma"]), gamma_sp=float(best["gamma_sp"]),
-                train=m.reconstruction_error(S_tr),
-                val=m.reconstruction_error(S_va),
-                test=m.reconstruction_error(S_te)))
-            e = rows[-1]
-            print(f"  [{exp}/{tag}] L={L:9.3g} sel={best_sel:7s} "
-                  f"act={e['n_active']:3d} mu={e['mu']:9.3g} "
-                  f"cert={e['cert']:9.3g} train={e['train']:.3f} "
-                  f"val={e['val']:.3f} test={e['test']:.3f}")
-    return rows
+    cfg = dict(cfg)
+    cfg["budget"] = None if np.isinf(L) else float(L)
+    stages = {}
+    for sel, sp in (("greedy", None), ("leading", r)):
+        skey = f"__stage:{key}:{sel}"
+        if skey not in out:
+            m = _fit_opm_base(S_tr, r, DEGREE_SETS[deg], cfg, s_pool=sp)
+            curves = _grid_curves(m, S_tr, S_va, cfg,
+                                  cfg.get("gamma_sp_points", 24), sel)
+            best = _select_config(curves, p["tol"])
+            # apply the tuned config and record exact errors NOW (the model
+            # is in hand), so the final assembly needs no refit.
+            _apply_opm_params(m, best["gamma_sp"], gamma=best.get("gamma"))
+            best = dict(best,
+                        exact_n_active=int(m.n_selected_nonlinear),
+                        exact_cert=float(m.certificate_),
+                        exact_train=m.reconstruction_error(S_tr),
+                        exact_val=m.reconstruction_error(S_va),
+                        exact_test=m.reconstruction_error(S_te))
+            out[skey] = best
+            json.dump(out, open(OUT_JSON, "w"), indent=1)
+            del m
+            return None                      # one heavy stage per call
+        stages[sel] = (None, None, out[skey])
+    best_sel = _select_variant(stages, p["variant_tol"])
+    best = stages[best_sel][2]
+    for v in ("greedy", "leading"):
+        out.pop(f"__stage:{key}:{v}", None)
+    row = dict(
+        exp=exp, deg=deg, r=p["r"], L=(None if np.isinf(L) else float(L)),
+        sel=best_sel, n_active=int(best["exact_n_active"]),
+        cert=float(best["exact_cert"]),
+        gamma=float(best["gamma"]), gamma_sp=float(best["gamma_sp"]),
+        train=float(best["exact_train"]),
+        val=float(best["exact_val"]),
+        test=float(best["exact_test"]))
+    print(f"  [{exp}/{deg}] L={L:9.3g} sel={row['sel']:7s} "
+          f"act={row['n_active']:3d} cert={row['cert']:9.3g} "
+          f"train={row['train']:.3f} val={row['val']:.3f} "
+          f"test={row['test']:.3f}")
+    return row
 
 
 def choose_L(rows, exp, deg):
@@ -187,18 +205,33 @@ def main(phase="all"):
     PLOTS.mkdir(exist_ok=True)
     out = json.load(open(OUT_JSON)) if OUT_JSON.exists() else {}
     todo = ("transport", "swe", "nse") if phase in ("all",) else (phase,)
+    t0 = time.time()
     for exp in todo:
         if exp in ("plots",):
             continue
+        blocks = cfg = None
         for deg in DEGREE_SETS:
-            key = f"{exp}:{deg}"
-            if key in out:
-                continue
-            print(f"[budget-study] {exp}/{deg} (r={EXPS[exp]['r']}):")
-            out[key] = study(exp, only_deg=deg)
-            json.dump(out, open(OUT_JSON, "w"), indent=1)
+            for L in L_GRID:
+                key = f"{exp}:{deg}:{L}"
+                if key in out:
+                    continue
+                if time.time() - t0 > WALL_BUDGET:
+                    print("[budget-study] wall budget hit; rerun to continue")
+                    return
+                if blocks is None:
+                    blocks, cfg = _load(exp)
+                row = None
+                while row is None:
+                    row = study_one(exp, deg, float(L), blocks, cfg, out, key)
+                    if row is None and time.time() - t0 > WALL_BUDGET:
+                        print("[budget-study] wall budget hit (staged); "
+                              "rerun to continue")
+                        return
+                out[key] = row
+                json.dump(out, open(OUT_JSON, "w"), indent=1)
     if phase in ("all", "plots"):
-        all_rows = [e for rows in out.values() for e in rows]
+        all_rows = [e for k, e in out.items()
+                    if not k.startswith("__stage")]
         plots(all_rows)
         for exp in ("transport", "swe", "nse"):
             for deg in DEGREE_SETS:
