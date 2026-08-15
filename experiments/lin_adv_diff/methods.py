@@ -29,13 +29,13 @@ jax.config.update("jax_enable_x64", True)
 
 from baselines import POD, GeelenQM, GreedyQM         # noqa: E402
 from greedyopm import GreedyOPM                       # noqa: E402
-from preprocess import PreprocessedModel, RowMinMaxNormalizer  # noqa: E402
+from preprocess import PreprocessedModel, Normalizer  # noqa: E402
 
 
 # ---- shared experiment configuration ----------------------------------------
 
 CFG = dict(
-    s_pool=40,            # candidate pool size for the greedy methods
+    s_pool=50,            # candidate pool size for the greedy methods
     L=100.0,              # Lipschitz budget of Greedy-OPM (fixed, no tuning)
     delta=0.1,            # extrapolation margin for the certificate
     n_grad_samples=128,   # gradient probe subsample in the greedy loop
@@ -94,7 +94,7 @@ def build_model(name: str, S_train, r: int, cfg: dict = CFG, *, L=None):
     A fitted :class:`preprocess.PreprocessedModel` exposing
     ``reconstruct`` / ``reconstruction_error`` in the original units.
     """
-    normalizer = RowMinMaxNormalizer().fit(S_train)
+    normalizer = Normalizer().fit(S_train)
     N_train = normalizer.transform(S_train)
 
     if name == "POD":

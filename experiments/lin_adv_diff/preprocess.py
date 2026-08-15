@@ -20,19 +20,28 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
-class RowMinMaxNormalizer:
-    """Center by the training row mean, then scale each row to [-1, 1].
+class Normalizer:
+    """Center by the training row mean, then scale each row.
 
     Arguments
     ---------
     eps : float
         Floor on the row half-ranges, guarding constant rows.
+    type : str | None
+        One of ``"minmaxsym"`` (symmetric min-max), ``"minmax"`` 
+        (standard min-max), or None (only centering).
+
     """
 
-    def __init__(self, eps: float = 1e-30):
+    def __init__(self, eps: float = 1e-30, type: str | None = None):
         self.eps = float(eps)
+        assert type in ("minmaxsym", "minmax", None), (
+            f"Unknown normalizer type {type!r}. "
+            " One of 'minmaxsym', 'minmax', or None is required."
+        )
+        self.type = type
 
-    def fit(self, S: jnp.ndarray) -> "RowMinMaxNormalizer":
+    def fit(self, S: jnp.ndarraye) -> "Normalizer":
         """Compute centering and scaling statistics from training data.
 
         Arguments
@@ -42,10 +51,19 @@ class RowMinMaxNormalizer:
         S = jnp.asarray(S)
         self.mu_ = jnp.mean(S, axis=1, keepdims=True)       # centering
         A = S - self.mu_
-        lo = jnp.min(A, axis=1, keepdims=True)
-        hi = jnp.max(A, axis=1, keepdims=True)
-        self.shift_ = 0.5 * (hi + lo)                       # row midrange
-        self.scale_ = jnp.maximum(0.5 * (hi - lo), self.eps)
+        if self.type == "minmaxsym":
+            lo = jnp.min(A, axis=1, keepdims=True)
+            hi = jnp.max(A, axis=1, keepdims=True)
+            self.shift_ = 0.5 * (hi + lo)                   # row midrange
+            self.scale_ = jnp.maximum(0.5 * (hi - lo), self.eps)
+        elif self.type == "minmax":
+            lo = jnp.min(A, axis=1, keepdims=True)
+            hi = jnp.max(A, axis=1, keepdims=True)
+            self.shift_ = lo
+            self.scale_ = jnp.maximum(hi - lo, self.eps)
+        else:
+            self.shift_ = 0.0
+            self.scale_ = 1.0
         return self
 
     def transform(self, S: jnp.ndarray) -> jnp.ndarray:
@@ -68,7 +86,7 @@ class PreprocessedModel:
     selected modes, ...) are forwarded to the inner model.
     """
 
-    def __init__(self, model, normalizer: RowMinMaxNormalizer):
+    def __init__(self, model, normalizer: Normalizer):
         self.model = model
         self.normalizer = normalizer
 
