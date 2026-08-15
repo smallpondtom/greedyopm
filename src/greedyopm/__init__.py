@@ -1,35 +1,41 @@
-"""GreedyOPM: Greedy Orthogonal Polynomial Manifold for dimensionality reduction.
+"""GreedyOPM: Greedy Orthogonal Polynomial Manifold under a Lipschitz budget.
 
 Public API
 ----------
-* :class:`GreedyOPM`      -- joint greedy mode + feature selection.
-* :class:`GreedyFixedOPM` -- greedy mode selection with all NL features active.
+* :class:`GreedyOPM`      -- greedy mode selection + exact feature selection
+  by closed-form Lipschitz-budget calibration (the paper's Algorithm 3).
+* :class:`GreedyFixedOPM` -- greedy mode selection with all nonlinear
+  features active (unregularized ablation).
 
-Polynomial utilities (also re-exported):
+Budget machinery (:mod:`greedyopm.budget`):
 
-* :func:`arnoldi_build`, :func:`arnoldi_eval` -- multivariate Arnoldi.
-* :func:`evaluate_monomials`, :func:`evaluate_classical_tensor`.
-* :func:`orthogonalize_qr`, :func:`orthogonalize_cholesky`, and refined variants.
+* :func:`calibrate_multiplier` -- exact sorted-breakpoint calibration.
+* :func:`shrink_factors`, :func:`feature_gains`, :func:`attained_budget`,
+  :func:`certificate_from_budget`.
+
+Polynomial utilities (:mod:`greedyopm.polynomials`):
+
+* :func:`arnoldi_build`, :func:`arnoldi_eval`, :func:`arnoldi_eval_grad`
+  and batched variants -- multivariate Vandermonde-with-Arnoldi.
 """
 
-from .greedy import GreedyFixedOPM, GreedyOPM
+from .budget import (
+    attained_budget,
+    calibrate_multiplier,
+    certificate_from_budget,
+    feature_gains,
+    shrink_factors,
+)
+from .greedy import GreedyOPM
+from .greedy_fixed import GreedyFixedOPM
 from .polynomials import (
     ArnoldiBasis,
     arnoldi_build,
+    arnoldi_build_batch,
     arnoldi_eval,
     arnoldi_eval_grad,
     arnoldi_grad_batch,
     arnoldi_orthonormality_error,
-    evaluate_classical_tensor,
-    evaluate_monomials,
-    extract_features_by_degree,
-    extract_poly_features,
-    orthogonalize_cholesky,
-    orthogonalize_cholesky_refined,
-    orthogonalize_hierarchical,
-    orthogonalize_hybrid,
-    orthogonalize_qr,
-    orthogonalize_qr_refined,
 )
 
 __all__ = [
@@ -37,20 +43,16 @@ __all__ = [
     "GreedyFixedOPM",
     "ArnoldiBasis",
     "arnoldi_build",
+    "arnoldi_build_batch",
     "arnoldi_eval",
     "arnoldi_eval_grad",
     "arnoldi_grad_batch",
     "arnoldi_orthonormality_error",
-    "evaluate_classical_tensor",
-    "evaluate_monomials",
-    "extract_features_by_degree",
-    "extract_poly_features",
-    "orthogonalize_cholesky",
-    "orthogonalize_cholesky_refined",
-    "orthogonalize_hierarchical",
-    "orthogonalize_hybrid",
-    "orthogonalize_qr",
-    "orthogonalize_qr_refined",
+    "attained_budget",
+    "calibrate_multiplier",
+    "certificate_from_budget",
+    "feature_gains",
+    "shrink_factors",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
