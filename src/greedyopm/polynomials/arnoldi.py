@@ -137,8 +137,8 @@ def _arnoldi_eval_grad_jit(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Joint evaluation of feature values AND gradients at new points.
 
-    Differentiates the stored Arnoldi recurrence (Proposition ``gradient
-    recurrence`` in the stability note): with u = s_ell * psi_parent,
+    Differentiates the stored Arnoldi recurrence (the gradient recurrence
+    of the paper): with u = s_ell * psi_parent,
 
         d_j psi_alpha = ( delta_{j,ell} psi_parent
                           + s_ell * d_j psi_parent

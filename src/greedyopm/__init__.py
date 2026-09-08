@@ -1,56 +1,70 @@
-"""GreedyOPM: Greedy Orthogonal Polynomial Manifold for dimensionality reduction.
+"""GreedyOPM: Greedy Orthogonal Polynomial Manifold under a Lipschitz budget.
 
 Public API
 ----------
-* :class:`GreedyOPM`      -- joint greedy mode + feature selection.
-* :class:`GreedyFixedOPM` -- greedy mode selection with all NL features active.
+* :class:`GreedyOPM`      -- greedy mode selection + exact feature selection
+  by closed-form Lipschitz-budget calibration (the paper's Algorithm 3).
+* :class:`GreedyFixedOPM` -- greedy mode selection with all nonlinear
+  features active (unregularized ablation).
 
-Polynomial utilities (also re-exported):
+Budget machinery (:mod:`greedyopm.budget`):
 
-* :func:`arnoldi_build`, :func:`arnoldi_eval` -- multivariate Arnoldi.
-* :func:`evaluate_monomials`, :func:`evaluate_classical_tensor`.
-* :func:`orthogonalize_qr`, :func:`orthogonalize_cholesky`, and refined variants.
+* :func:`calibrate_multiplier` -- exact sorted-breakpoint calibration.
+* :func:`shrink_factors`, :func:`feature_gains`, :func:`attained_budget`,
+  :func:`certificate_from_budget`.
+
+Polynomial utilities (:mod:`greedyopm.polynomials`):
+
+* :func:`arnoldi_build`, :func:`arnoldi_eval`, :func:`arnoldi_eval_grad`
+  and batched variants -- multivariate Vandermonde-with-Arnoldi.
+
+Operator Inference on the manifold (:mod:`greedyopm.opinf`):
+
+* :func:`opinf.infer_operators`, :func:`opinf.fbct4` -- non-intrusive operator
+  regression and fourth-order FBCT derivative estimation.
+* :func:`opinf.simulate` / :func:`opinf.simulate_gmg` -- plain latent and
+  geometric manifold-Galerkin reduced-model rollouts (the working note
+  ``notes/opinf_opm.tex``).
+* :func:`opinf.interp_operator_dict` / :func:`opinf.extrap_operator_dict` --
+  entrywise spline interpolation / affine extrapolation of parametric operators.
 """
 
-from .greedy import GreedyFixedOPM, GreedyOPM
+from .budget import (
+    attained_budget,
+    calibrate_multiplier,
+    certificate_from_budget,
+    feature_gains,
+    shrink_factors,
+)
+from . import opinf
+from .greedy import GreedyOPM
+from .greedy_fixed import GreedyFixedOPM
 from .polynomials import (
     ArnoldiBasis,
     arnoldi_build,
+    arnoldi_build_batch,
     arnoldi_eval,
     arnoldi_eval_grad,
     arnoldi_grad_batch,
     arnoldi_orthonormality_error,
-    evaluate_classical_tensor,
-    evaluate_monomials,
-    extract_features_by_degree,
-    extract_poly_features,
-    orthogonalize_cholesky,
-    orthogonalize_cholesky_refined,
-    orthogonalize_hierarchical,
-    orthogonalize_hybrid,
-    orthogonalize_qr,
-    orthogonalize_qr_refined,
 )
 
 __all__ = [
+    "opinf",
     "GreedyOPM",
     "GreedyFixedOPM",
     "ArnoldiBasis",
     "arnoldi_build",
+    "arnoldi_build_batch",
     "arnoldi_eval",
     "arnoldi_eval_grad",
     "arnoldi_grad_batch",
     "arnoldi_orthonormality_error",
-    "evaluate_classical_tensor",
-    "evaluate_monomials",
-    "extract_features_by_degree",
-    "extract_poly_features",
-    "orthogonalize_cholesky",
-    "orthogonalize_cholesky_refined",
-    "orthogonalize_hierarchical",
-    "orthogonalize_hybrid",
-    "orthogonalize_qr",
-    "orthogonalize_qr_refined",
+    "attained_budget",
+    "calibrate_multiplier",
+    "certificate_from_budget",
+    "feature_gains",
+    "shrink_factors",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
