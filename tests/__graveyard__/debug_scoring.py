@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 jax.config.update("jax_enable_x64", True)
 
-from experiments.data.transport import generate_advecting_pulse
+from experiments.__old__.data.transport import generate_advecting_pulse
 from greedyopm.polynomials.arnoldi import arnoldi_build, arnoldi_build_batch
 from greedyopm.polynomials.multindex import graded_lex_multi_indices_for_degrees
 

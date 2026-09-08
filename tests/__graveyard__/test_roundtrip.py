@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 jax.config.update("jax_enable_x64", True)
 
-from experiments.data.transport import generate_advecting_pulse
+from experiments.__old__.data.transport import generate_advecting_pulse
 from greedyopm import GreedyFixedOPM, GreedyOPM
 
 

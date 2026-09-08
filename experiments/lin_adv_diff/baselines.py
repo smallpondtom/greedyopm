@@ -48,6 +48,32 @@ def quadratic_features(S_hat: jnp.ndarray) -> jnp.ndarray:
 
 
 @jax.jit
+def cubic_features(S_hat: jnp.ndarray) -> jnp.ndarray:
+    """Distinct cubic monomials ``s_i s_j s_k`` (``i <= j <= k``).
+
+    The vectorised, boolean-index-free construction: for every pair
+    ``i <= j`` the last factor ``s_k`` ranges over ``k = j, ..., r-1`` in one
+    broadcast, so the whole degree-3 shell is built in ``O(r^2)`` traced ops
+    with the reduced dimension ``r`` static (jit/vmap-compatible).
+
+    Arguments
+    ---------
+    S_hat : (r, n)
+
+    Returns
+    -------
+    P : (C(r+2, 3), n) = (r (r+1) (r+2) / 6, n)  in grlex-like i<=j<=k order.
+    """
+    r = S_hat.shape[0]
+    blocks = []
+    for i in range(r):
+        si = S_hat[i]
+        for j in range(i, r):
+            blocks.append(si * S_hat[j] * S_hat[j:])
+    return jnp.concatenate(blocks, axis=0)
+
+
+@jax.jit
 def _ridge_fit_error(P: jnp.ndarray, B: jnp.ndarray, reg: float) -> jnp.ndarray:
     """Residual norm of the ridge fit  min_X ||X P - B||_F  (SVD filter).
 
@@ -251,6 +277,133 @@ class GreedyQM:
     def n_active_nonlinear(self) -> int:
         """The full quadratic shell is always active."""
         return self.r * (self.r + 1) // 2
+
+
+# ---------------------------------------------------------------------------
+# Greedy-CM (cubic manifold: greedy modes + full cubic-monomial shell)
+# ---------------------------------------------------------------------------
+
+
+class GreedyCM:
+    """Greedy cubic manifold: greedy mode selection + full cubic shell.
+
+    Identical in structure to :class:`GreedyQM` but the nonlinear feature
+    map is the degree-3 monomial shell ``s_i s_j s_k`` (``i <= j <= k``)
+    instead of the quadratic one -- a pure cubic correction to the linear
+    POD part (``Gamma(s_hat) = s_ref + V s_hat + Vbar p_3(s_hat)``).  The
+    candidate modes are scored by the ridge-regularized least-squares fit of
+    the projection residual with cubic features of the trial coordinates,
+    and the final lifting refits the exact d-dimensional residual.
+
+    Arguments
+    ---------
+    r : int
+        Reduced dimension.
+    s : int
+        Candidate pool size (``s > r``).
+    reg : float
+        Tikhonov magnitude of the SVD filter ``sigma / (sigma^2 + reg^2)``.
+    center : bool
+        Whether to subtract the snapshot mean before the SVD.
+    """
+
+    def __init__(self, r: int, s: int, *, reg: float = 1e-13,
+                 center: bool = True):
+        if s <= r:
+            raise ValueError(f"Need a candidate pool s > r; got s={s}, r={r}.")
+        self.r = int(r)
+        self.s = int(s)
+        self.reg = float(reg)
+        self.center = bool(center)
+
+    def fit(self, S: jnp.ndarray) -> "GreedyCM":
+        """Fit to snapshot data ``S`` of shape ``(d, n)``."""
+        S = jnp.asarray(S)
+        d, n = S.shape
+        self.s_ref_ = (
+            jnp.mean(S, axis=1, keepdims=True)
+            if self.center else jnp.zeros((d, 1), dtype=S.dtype)
+        )
+        S_tilde = S - self.s_ref_
+
+        U, sigma, Wt = jnp.linalg.svd(S_tilde, full_matrices=False)
+        rank = int(sigma.shape[0])
+        s_eff = min(self.s, rank)
+        SigmaWt = sigma[:, None] * Wt                       # (rank, n)
+
+        J: list[int] = []
+        pool = set(range(s_eff))
+        score_batch = jax.vmap(_ridge_fit_error, in_axes=(0, 0, None))
+
+        for _ in range(self.r):
+            candidates = sorted(pool)
+            cand_arr = np.asarray(candidates, dtype=np.int32)
+            n_cand = len(candidates)
+
+            cand_rows = SigmaWt[cand_arr][:, None, :]
+            if J:
+                committed = jnp.broadcast_to(
+                    SigmaWt[jnp.asarray(J)][None, :, :],
+                    (n_cand, len(J), n),
+                )
+                trials = jnp.concatenate([committed, cand_rows], axis=1)
+            else:
+                trials = cand_rows
+
+            out_all = np.setdiff1d(np.arange(rank), np.asarray(J))
+            B_all = SigmaWt[jnp.asarray(out_all)]           # (K, n)
+            pos = {int(m): k for k, m in enumerate(out_all)}
+            B_batch = jnp.stack([
+                B_all.at[pos[int(j)], :].set(0.0) for j in candidates
+            ])                                              # (n_cand, K, n)
+
+            P_batch = jax.vmap(cubic_features)(trials)      # (n_cand, m, n)
+            errors = score_batch(P_batch, B_batch, self.reg)
+            j_star = candidates[int(jnp.argmin(errors))]
+            J.append(j_star)
+            pool.remove(j_star)
+
+        self.J_ = np.asarray(J, dtype=np.int32)
+        self.U_r_ = U[:, jnp.asarray(J)]
+        S_hat = SigmaWt[jnp.asarray(J)]                     # (r, n)
+        E = S_tilde - self.U_r_ @ S_hat
+
+        P = cubic_features(S_hat)
+        Us, sv, Vt = jnp.linalg.svd(P, full_matrices=False)
+        filt = sv / (sv ** 2 + self.reg ** 2)
+        self.Vbar_ = ((E @ Vt.T) * filt[None, :]) @ Us.T    # (d, m)
+        return self
+
+    def encode(self, S: jnp.ndarray) -> jnp.ndarray:
+        """Linear encoding ``s_hat = V^T (s - s_ref)``."""
+        return self.U_r_.T @ (jnp.asarray(S) - self.s_ref_)
+
+    def decode(self, S_hat: jnp.ndarray) -> jnp.ndarray:
+        """Cubic decoding with the full degree-3 monomial shell."""
+        S_hat = jnp.asarray(S_hat)
+        return (
+            self.s_ref_ + self.U_r_ @ S_hat
+            + self.Vbar_ @ cubic_features(S_hat)
+        )
+
+    def reconstruct(self, S: jnp.ndarray) -> jnp.ndarray:
+        """Full encode -> decode pipeline."""
+        return self.decode(self.encode(S))
+
+    def reconstruction_error(
+        self, S: jnp.ndarray, *, relative: bool = True,
+    ) -> float:
+        """Frobenius reconstruction error."""
+        S = jnp.asarray(S)
+        err = float(jnp.linalg.norm(S - self.reconstruct(S), "fro"))
+        if relative:
+            return err / float(jnp.linalg.norm(S - self.s_ref_, "fro"))
+        return err
+
+    @property
+    def n_active_nonlinear(self) -> int:
+        """The full cubic shell is always active: ``C(r+2, 3)``."""
+        return self.r * (self.r + 1) * (self.r + 2) // 6
 
 
 # ---------------------------------------------------------------------------

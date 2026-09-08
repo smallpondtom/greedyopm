@@ -1,20 +1,28 @@
 """Advection-diffusion comparison experiment (driver).
 
 Compares POD, Greedy-QM, Geelen-QM, and the budget-calibrated Greedy-OPM
-(degrees {2} and {2, 3, 4}) on the periodic linear advection-diffusion
-problem of :mod:`problem`.  Training uses one domain traversal at the
-training wave speed; testing uses (i) an unseen wave speed over the same
-window and (ii) a contiguous forecast window.  The only Greedy-OPM
-hyperparameter is the Lipschitz budget ``L`` (the dilation ``delta`` is
-fixed); there is no validation set.
+(degrees {2} and {2, 3}) on the periodic linear advection-diffusion problem
+of :mod:`problem`, now over a **wide** range of wave speeds and with **two**
+test scenarios:
 
-Phases (resumable via the JSON checkpoint; rerun until it prints DONE):
+* ``test_interp`` -- a random interior wave speed (interpolation);
+* ``test_extrap`` -- a wave speed beyond the training range (extrapolation),
+  where an unregularised polynomial manifold extrapolates wildly and the
+  Lipschitz budget earns its keep.
 
-* ``budget`` -- error / active features / certificate vs L at ``R_BUDGET``
-  (full refit at every L, so the mode selection is L-consistent).
-* ``sweep``  -- all methods for r = 1, ..., R_MAX at the fixed budget.
+The Lipschitz budget ``L`` is chosen **automatically and per variant**
+(``p=2`` and ``p=3`` separately) by the grid-adaptive sweep in
+:mod:`budget_select`: a geometric-mean objective over the interpolation and
+extrapolation *validation* splits, refined to 0.01 precision.  Nothing is
+hard-coded in ``methods.py``.
+
+Phases (resumable via the JSON checkpoints):
+
+* ``budget`` -- select ``L*_{p2}`` and ``L*_{p3}`` (grid-adaptive), and
+  record the full-range budget curve for the figures.
+* ``sweep``  -- all methods for r = 1..R_MAX (each Greedy-OPM at its own L*).
 * ``plots``  -- error-vs-r curves, active-feature bars, budget-study plot.
-* ``field``  -- space-time reconstruction / error panels at ``R_FIELD``.
+* ``field``  -- space-time reconstruction / error panels (interp + extrap).
 * ``all``    -- everything above, in order.
 """
 
@@ -42,20 +50,24 @@ from methods import (  # noqa: E402
     build_model,
     n_active,
 )
-from problem import make_dataset  # noqa: E402
+from problem import SPLITS, make_dataset  # noqa: E402
+from budget_select import select_budget  # noqa: E402
 
 PLOTS = _HERE / "plots"
 CKPT = PLOTS / "lin_adv_diff_results.json"
 CKPT_BUDGET = PLOTS / "lin_adv_diff_budget_study.json"
+REPORT = PLOTS / "lin_adv_diff_report.json"
 
 R_MAX = 10
 RS = list(range(1, R_MAX + 1))
-R_BUDGET = 8                    # reduced dimension of the L study
-R_FIELD = 8                     # reduced dimension of the field panels
-L_GRID = [1.5, 3.0, 10.0, 30.0, 100.0, 300.0, 1e3, 1e4, 1e6]
+R_BUDGET = 10                    # reduced dimension of the L selection
+R_FIELD = 10                     # reduced dimension of the field panels
 
-SPLITS = ("train", "test_param", "test_forecast")
-
+#: Full-range grid on which the budget curve is drawn (cheap, set_budget).
+PLOT_GRID = list(np.geomspace(1.05, 1.0e5, 30))
+#: Splits whose error is recorded along the budget curve.
+CURVE_SPLITS = ("train", "val_interp", "val_extrap", "test_interp",
+                "test_extrap")
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -78,51 +90,53 @@ def _evaluate(model, S: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Phase: budget study (error vs L, full refit per L)
+# Phase: grid-adaptive, per-variant budget selection
 # ---------------------------------------------------------------------------
 
 
-def run_budget_study(S: dict) -> dict:
-    """Fit both Greedy-OPM variants at every budget in ``L_GRID``."""
+def run_budget_selection(S: dict) -> dict:
+    """Select ``L*`` for each Greedy-OPM variant; record the budget curves."""
     study = _load(CKPT_BUDGET)
     for name in OPM_DEGREES:
-        recs = study.setdefault(name, [])
-        done = {rec["L"] for rec in recs}
-        for L in L_GRID:
-            if L in done:
-                continue
-            tic = time.time()
-            model = build_model(name, S["train"], R_BUDGET, L=L)
-            rec = dict(L=L, **_evaluate(model, S),
-                       n_active=n_active(model),
-                       certificate=model.certificate_,
-                       lambda_=model.lambda_,
-                       secs=round(time.time() - tic, 1))
-            recs.append(rec)
-            recs.sort(key=lambda rec: rec["L"])
-            _save(CKPT_BUDGET, study)
-            print(f"  [budget] {name} r={R_BUDGET} L={L:>8g}: "
-                  f"train={rec['train']:.3e} param={rec['test_param']:.3e} "
-                  f"forecast={rec['test_forecast']:.3e} "
-                  f"act={rec['n_active']} ({rec['secs']}s)")
+        if name in study and "L_star" in study[name]:
+            print(f"  [budget] {name}: cached L* = {study[name]['L_star']:g}",
+                  flush=True)
+            continue
+        tic = time.time()
+        rec = select_budget(name, S, PLOT_GRID, CURVE_SPLITS,
+                            r_budget=R_BUDGET, log=print)
+        rec["secs"] = round(time.time() - tic, 1)
+        study[name] = rec
+        _save(CKPT_BUDGET, study)
     return study
 
 
+def resolve_Ls() -> dict:
+    """Selected budgets ``{variant: L*}`` (raises if selection not run)."""
+    study = _load(CKPT_BUDGET)
+    Ls = {name: study[name]["L_star"] for name in OPM_DEGREES
+          if name in study and "L_star" in study[name]}
+    if len(Ls) != len(OPM_DEGREES):
+        raise RuntimeError("Budget not selected yet; run the 'budget' phase.")
+    return Ls
+
+
 # ---------------------------------------------------------------------------
-# Phase: r-sweep at the fixed budget
+# Phase: r-sweep at the selected budgets
 # ---------------------------------------------------------------------------
 
 
-def run_sweep(S: dict) -> dict:
-    """Fit every method at every r; store errors and feature counts."""
+def run_sweep(S: dict, Ls: dict) -> dict:
+    """Fit every method at every r; each Greedy-OPM variant uses its own L*."""
     results = _load(CKPT)
+    results.setdefault("_meta", {})["L_star"] = Ls
     for r in RS:
         for name in METHOD_NAMES:
             key = f"{name}@r={r}"
             if key in results:
                 continue
             tic = time.time()
-            model = build_model(name, S["train"], r)
+            model = build_model(name, S["train"], r, L=Ls.get(name))
             rec = dict(method=name, r=r, **_evaluate(model, S),
                        n_active=n_active(model),
                        n_active_by_degree=active_by_degree(model),
@@ -131,10 +145,11 @@ def run_sweep(S: dict) -> dict:
                        secs=round(time.time() - tic, 1))
             results[key] = rec
             _save(CKPT, results)
-            print(f"  r={r:2d}  {name:18s} train={rec['train']:.3e} "
-                  f"param={rec['test_param']:.3e} "
-                  f"forecast={rec['test_forecast']:.3e} "
-                  f"act={rec['n_active']:>3d}  ({rec['secs']}s)")
+            print(f"  r={r:2d}  {name:18s} "
+                  f"train={rec['train']:.2e} "
+                  f"t_in={rec['test_interp']:.2e} "
+                  f"t_ex={rec['test_extrap']:.2e} "
+                  f"act={rec['n_active']:>3d}  ({rec['secs']}s)", flush=True)
     return results
 
 
@@ -143,44 +158,37 @@ def run_sweep(S: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def run_plots() -> None:
-    """Render the error-vs-r, active-feature, and budget-study figures."""
-    from plots import active_features_bar, budget_study, error_vs_r
+def run_plots(Ls: dict) -> None:
+    """Render every figure (journal-quality, no titles) from the checkpoints."""
+    from plots import (active_features_bar, budget_study,
+                       certificate_vs_budget, error_vs_r)
 
     results = _load(CKPT)
-    error_vs_r(
-        results, RS, METHOD_NAMES,
-        str(PLOTS / "lin_adv_diff_error_vs_r"),
-        "Advection-diffusion — reconstruction error vs reduced dimension "
-        f"(Greedy-OPM at $L = {CFG['L']:g}$, $\\delta = {CFG['delta']:g}$)",
-    )
-    active_features_bar(
-        results, RS, METHOD_NAMES,
-        str(PLOTS / "lin_adv_diff_active_features"),
-        "Advection-diffusion — active nonlinear features vs reduced dimension",
-    )
+    error_vs_r(results, RS, METHOD_NAMES,
+               str(PLOTS / "lin_adv_diff_error_vs_r"),
+               splits=("train", "test_interp", "test_extrap"))
+    active_features_bar(results, RS, METHOD_NAMES,
+                        str(PLOTS / "lin_adv_diff_active_features"))
+    certificate_vs_budget(results, RS, list(OPM_DEGREES), Ls,
+                          str(PLOTS / "lin_adv_diff_certificate"))
     study = _load(CKPT_BUDGET)
     if study:
-        budget_study(
-            study,
-            str(PLOTS / "lin_adv_diff_budget_study"),
-            "Advection-diffusion — reconstruction error vs Lipschitz budget "
-            f"$L$ (full refit per $L$, $r = {R_BUDGET}$)",
-        )
+        budget_study(study, str(PLOTS / "lin_adv_diff_budget_study"))
 
 
 # ---------------------------------------------------------------------------
-# Phase: field panels (bonus)
+# Phase: field panels (interp + extrap)
 # ---------------------------------------------------------------------------
 
 
-def run_field(data: dict, S: dict) -> None:
+def run_field(data: dict, S: dict, Ls: dict) -> None:
     """Space-time reconstruction / error panels on both test splits."""
     from plots import field_panels
 
-    models = {name: build_model(name, S["train"], R_FIELD)
+    models = {name: build_model(name, S["train"], R_FIELD, L=Ls.get(name))
               for name in METHOD_NAMES}
-    for split in ("test_param", "test_forecast"):
+    for split, tag in (("test_interp", "interpolated"),
+                       ("test_extrap", "extrapolated")):
         truth = np.asarray(data[split]["S"])
         t, x = data[split]["t"], data[split]["x"]
         extent = [t[0], t[-1], x[0], x[-1]]
@@ -188,14 +196,95 @@ def run_field(data: dict, S: dict) -> None:
         for name, model in models.items():
             recon[name] = np.asarray(model.reconstruct(S[split]))
             rel[name] = model.reconstruction_error(S[split], relative=True)
-        tag = ("unseen wave speed" if split == "test_param" else "forecast")
         field_panels(
             truth, recon, METHOD_NAMES,
             str(PLOTS / f"lin_adv_diff_field_{split}"),
-            f"Advection-diffusion — space-time reconstruction "
-            f"({tag}, $r = {R_FIELD}$)",
             extent=extent, rel_errs=rel,
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase: journal report (values worth reporting in a paper)
+# ---------------------------------------------------------------------------
+
+
+def run_report(data: dict, Ls: dict) -> dict:
+    """Collect the journal-reportable quantities into a single JSON."""
+    import problem as prob
+
+    results = _load(CKPT)
+    study = _load(CKPT_BUDGET)
+
+    # certificate validity across r (primal-dual check)
+    certificate_validity = {}
+    for name in OPM_DEGREES:
+        L = float(Ls[name])
+        per_r, ratios = [], []
+        for r in RS:
+            c = results[f"{name}@r={r}"].get("certificate")
+            ratio = None if c is None else c / L
+            if ratio is not None:
+                ratios.append(ratio)
+            per_r.append(dict(r=r, certificate=c, budget=L, ratio=ratio,
+                              valid=(c is not None and c <= L * (1 + 1e-9))))
+        certificate_validity[name] = dict(
+            budget=L, per_r=per_r,
+            max_ratio=(max(ratios) if ratios else None),
+            all_valid=all(x["valid"] for x in per_r),
+        )
+
+    # per-method training times, errors, active features
+    training_times_s, errors, active_features = {}, {}, {}
+    for name in METHOD_NAMES:
+        training_times_s[name] = {
+            str(r): results[f"{name}@r={r}"]["secs"] for r in RS}
+        errors[name] = {
+            str(r): {sp: results[f"{name}@r={r}"][sp] for sp in SPLITS}
+            for r in RS}
+        active_features[name] = {
+            str(r): results[f"{name}@r={r}"]["n_active"] for r in RS}
+
+    budget_selection = {
+        name: dict(L_star=float(study[name]["L_star"]),
+                   selection_time_s=study[name].get("secs"),
+                   n_evaluations=len(study[name].get("history", [])),
+                   best_objective=min((h["objective"]
+                                       for h in study[name].get("history", [])),
+                                      default=None))
+        for name in OPM_DEGREES if name in study
+    }
+
+    report = dict(
+        experiment="lin_adv_diff",
+        problem="periodic linear advection-diffusion",
+        parameter="wave speed c",
+        config=dict(
+            state_dim=int(data["train"]["S"].shape[0]),
+            n_train=int(data["train"]["S"].shape[1]),
+            n_params_train=len(data["train"]["speeds"]),
+            snaps_per_param=data["train"]["n_per"],
+            train_range=[prob.C_MIN, prob.C_MAX],
+            train_speeds=data["train"]["speeds"],
+            val_interp_speeds=data["val_interp"]["speeds"],
+            val_extrap_speed=data["val_extrap"]["c"],
+            test_interp_speed=data["test_interp"]["c"],
+            test_extrap_speed=data["test_extrap"]["c"],
+            nu=prob.NU, delta=CFG["delta"], s_pool=CFG["s_pool"],
+            n_grad_samples=CFG["n_grad_samples"], r_max=R_MAX,
+            r_budget=R_BUDGET,
+        ),
+        selected_budgets=Ls,
+        budget_selection=budget_selection,
+        certificate_validity=certificate_validity,
+        training_times_s=training_times_s,
+        errors=errors,
+        active_features=active_features,
+    )
+    _save(REPORT, report)
+    ok = all(v["all_valid"] for v in certificate_validity.values())
+    print(f"    saved {REPORT.name}  (certificate <= budget for all r: {ok})",
+          flush=True)
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -208,17 +297,28 @@ def main(phase: str = "all") -> None:
     S = {sp: jnp.asarray(data[sp]["S"]) for sp in SPLITS}
     print(f"[lin_adv_diff] d={S['train'].shape[0]} "
           f"n_train={S['train'].shape[1]} "
-          f"n_test={S['test_param'].shape[1]}/{S['test_forecast'].shape[1]} "
-          f"L={CFG['L']:g} delta={CFG['delta']:g} phase={phase}")
+          f"({len(data['train']['speeds'])} speeds x {data['train']['n_per']}) "
+          f"delta={CFG['delta']:g} phase={phase}", flush=True)
+    print(f"  train speeds:  {np.round(data['train']['speeds'], 3).tolist()}",
+          flush=True)
+    print(f"  val_interp:    {np.round(data['val_interp']['speeds'], 3).tolist()}"
+          f"   val_extrap: {data['val_extrap']['c']:.3f}", flush=True)
+    print(f"  test_interp:   {data['test_interp']['c']:.3f}"
+          f"   test_extrap: {data['test_extrap']['c']:.3f}", flush=True)
 
     if phase in ("all", "budget"):
-        run_budget_study(S)
+        run_budget_selection(S)
+    Ls = resolve_Ls()
+    print(f"[lin_adv_diff] selected budgets: "
+          + ", ".join(f"{k} -> L*={v:g}" for k, v in Ls.items()), flush=True)
     if phase in ("all", "sweep"):
-        run_sweep(S)
+        run_sweep(S, Ls)
     if phase in ("all", "plots"):
-        run_plots()
+        run_plots(Ls)
     if phase in ("all", "field"):
-        run_field(data, S)
+        run_field(data, S, Ls)
+    if phase in ("all", "plots", "report"):
+        run_report(data, Ls)
     print("DONE")
 
 
