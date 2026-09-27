@@ -271,66 +271,66 @@ def certificate_vs_budget(results, rs, opm_names, L_star, out_prefix,
 # ---------------------------------------------------------------------------
 
 #: Wake-focused crop window in chord units (x downstream, y transverse).
-_CROP = dict(x0=-1.0, x1=8.0, y0=-2.4, y1=1.8)
+_CROP = dict(x0=-0.6, x1=8.0, y0=-1.5, y1=2.6)
 
 
-def _crop(img, extent):
-    x = np.linspace(extent[0], extent[1], img.shape[1])
-    y = np.linspace(extent[2], extent[3], img.shape[0])
-    ix = np.where((x >= _CROP["x0"]) & (x <= _CROP["x1"]))[0]
-    iy = np.where((y >= _CROP["y0"]) & (y <= _CROP["y1"]))[0]
-    sub = img[iy[0]:iy[-1] + 1, ix[0]:ix[-1] + 1]
-    ext = [x[ix[0]], x[ix[-1]], y[iy[0]], y[iy[-1]]]
-    return sub, ext
+def _tri_window(geom):
+    """Triangles of the plotting triangulation that lie inside the crop window."""
+    from matplotlib.tri import Triangulation
+    x, y, tri = geom["x"], geom["y"], geom["tri_plot"]
+    inside = ((x >= _CROP["x0"]) & (x <= _CROP["x1"])
+              & (y >= _CROP["y0"]) & (y <= _CROP["y1"]))
+    keep = inside[tri].any(axis=1)
+    return Triangulation(x, y, tri[keep])
 
 
-def field_panels(truth_img, recon_imgs, names, out_prefix, *, extent, chi,
-                 rel_errs=None, title=None):
-    """One column per method: speed reconstruction (top) and |error| (bottom),
-    cropped to the airfoil wake, with the airfoil outlined."""
-    truth_c, ext = _crop(truth_img, extent)
-    chi_c, _ = _crop(chi, extent)
-    recon_c = {nm: _crop(recon_imgs[nm], extent)[0] for nm in names}
-    errs = {nm: np.abs(recon_c[nm] - truth_c) for nm in names}
+def field_panels(truth, recon, names, out_prefix, *, geom, rel_errs=None,
+                 title=None):
+    """One column per method: speed reconstruction (top) and |error| (bottom)
+    on the unstructured mesh, cropped to the airfoil wake, airfoil outlined.
 
+    ``truth`` and each ``recon[name]`` are nodal speed fields (length n_nodes);
+    ``geom`` is :func:`problem.load_geom`."""
+    triang = _tri_window(geom)
+    errs = {nm: np.abs(recon[nm] - truth) for nm in names}
     n = len(names)
-    vmax = float(np.percentile(truth_c, 99.7))
-    # Set the error scale from the *non-diverged* methods so their structure is
-    # visible; a catastrophically over-extrapolating method saturates instead of
-    # flattening everyone else to black.
+    win = ((geom["x"] >= _CROP["x0"]) & (geom["x"] <= _CROP["x1"])
+           & (geom["y"] >= _CROP["y0"]) & (geom["y"] <= _CROP["y1"]))
+    vmax = float(np.percentile(truth[win], 99.7))
     if rel_errs is not None:
         lo = min(rel_errs.values())
         keep = [nm for nm in names if rel_errs[nm] <= 4.0 * lo] or list(names)
     else:
         keep = list(names)
-    emax = float(max(np.percentile(errs[nm], 99.0) for nm in keep))
+    emax = float(max(np.percentile(errs[nm][win], 99.0) for nm in keep))
     emax = max(emax, 1e-6)
-    im_kw = dict(extent=ext, origin="lower", aspect="equal")
 
-    aspect = (ext[1] - ext[0]) / (ext[3] - ext[2])
+    aspect = (_CROP["x1"] - _CROP["x0"]) / (_CROP["y1"] - _CROP["y0"])
     cell_h = 1.85
     fig = plt.figure(figsize=(cell_h * aspect * n + 2.0, cell_h * 2 + 1.5))
     grid = ImageGrid(fig, 111, nrows_ncols=(2, n), axes_pad=(0.12, 0.42),
                      share_all=True, cbar_mode="edge", cbar_location="right",
                      cbar_size="5%", cbar_pad=0.10)
+    af = np.append(geom["airfoil"], geom["airfoil"][0])
 
     def _airfoil(ax):
-        ax.contour(chi_c, levels=[0.5], colors="k", linewidths=1.0,
-                   extent=ext, origin="lower")
+        ax.fill(geom["x"][af], geom["y"][af], color="white", zorder=3)
+        ax.plot(geom["x"][af], geom["y"][af], color="k", lw=1.0, zorder=4)
 
     im_recon = im_err = None
     for j, nm in enumerate(names):
         a0, a1 = grid[j], grid[n + j]
-        im_recon = a0.imshow(np.clip(recon_c[nm], 0, vmax), cmap="viridis",
-                             vmin=0, vmax=vmax, **im_kw)
+        im_recon = a0.tripcolor(triang, np.clip(recon[nm], 0, vmax), shading="gouraud", rasterized=True,
+                                cmap="viridis", vmin=0, vmax=vmax)
         _airfoil(a0)
         tag = nm + (f"\n(rel. err {rel_errs[nm]:.2e})" if rel_errs else "")
         a0.set_title(tag, fontsize=13.5)
-        im_err = a1.imshow(np.clip(errs[nm], 0, emax), cmap="magma",
-                           vmin=0, vmax=emax, **im_kw)
+        im_err = a1.tripcolor(triang, np.clip(errs[nm], 0, emax), shading="gouraud", rasterized=True,
+                              cmap="magma", vmin=0, vmax=emax)
         _airfoil(a1)
-        a0.set_xticks([]); a1.set_xticks([])
-        a0.set_yticks([]); a1.set_yticks([])
+        for a in (a0, a1):
+            a.set_xlim(_CROP["x0"], _CROP["x1"]); a.set_ylim(_CROP["y0"], _CROP["y1"])
+            a.set_aspect("equal"); a.set_xticks([]); a.set_yticks([])
         if j == 0:
             a0.set_ylabel(r"Reconstruction $|u|$", fontsize=15)
             a1.set_ylabel("Absolute error", fontsize=15)

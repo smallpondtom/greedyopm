@@ -248,6 +248,7 @@ class GreedyOPM:
             self.s_ref_ = jnp.mean(S, axis=1, keepdims=True)
         else:
             self.s_ref_ = jnp.zeros((d, 1), dtype=S.dtype)
+        S_tilde = S - self.s_ref_
 
         U_full, sigma_full, Wt_full = jnp.linalg.svd(S_tilde, full_matrices=False)
         s_eff = min(self.s, int(sigma_full.shape[0]))

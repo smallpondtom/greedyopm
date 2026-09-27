@@ -1,10 +1,11 @@
 # data/
 
-Populated by `python ../run_param.py`, which writes one file per angle:
-
-    naca_a04.npz  naca_a08.npz  naca_a12.npz  naca_a16.npz  naca_a20.npz  naca_a24.npz
-
-Each `.npz` holds `x, y, t, u, v, omega, chi` plus metadata (Re, alpha_deg, dt,
-chord, U_inf) at 512 x 256 over t in [0, 30], snapshot spacing 0.2. Each file is
-about 200 MB (the six-angle set is ~1.2 GB), so the raw data is not committed here;
-regenerate with `python run_param.py`.
+* `naca0012_lam.su2`, `mesh.npz`, `mesh_preview.png` -- the body-fitted hybrid mesh
+  (`make_mesh.py`), shared by every angle.
+* `naca_aXX.npz` -- one SU2 run per angle of attack (laminar, Re_c = 1000, t in
+  [0, 60], snapshots every 0.2): `x, y, t, u, v, p, force_t, Cl, Cd, tris, quads,
+  airfoil_nodes` plus scalars. About 120 MB each. Delivered in 19 MB pieces under
+  `_chunks/`; run `python join_chunks.py` once to reassemble them, then delete
+  `_chunks/`. Regenerate with `run_param.py` (needs SU2_CFD).
+* `compressed/` -- built on first use by `problem.py` (union-basis compression).
+* `archive_512x256_coarse/` -- the retired Fourier/penalization data (see its README).

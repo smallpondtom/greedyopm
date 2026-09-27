@@ -1,32 +1,76 @@
-# Greedy Orthogonal Polynomial Manifold
+# Greedy Orthogonal Polynomial Manifold (Greedy-OPM)
 
-## Stability regularization (Jacobian / Lipschitz control)
+A nonlinear trial manifold for model reduction,
 
-`GreedyOPM` supports out-of-distribution stabilization in the style of
-Bensalah, Nouy & Soffo (arXiv:2502.05088), adapted to the OPM structure; see
-the paper (`paper/.../sections/method.tex`) for the theory.
-
-```python
-model = GreedyOPM(
-    r=4, s=16, p=3,
-    mu=1e-2,            # Jacobian penalty weight (0 = original algorithm)
-    grad_dilation=0.25, # probe gradients at (1 + delta) * s_hat (OOD collar)
-    n_grad_samples=64,  # subsample probe points in the greedy loop
-    budget=5.0,         # optional: fit() enforces L_hat <= budget (mu-loop)
-).fit(S)
-
-model.certificate_                          # a posteriori bound, set by fit()
-model.lipschitz_certificate(dilation=0.25)  # re-evaluate at another dilation
-model.decoder_jacobian_norms(S_hat_pts)     # pointwise ||J_Gamma||_2
-model.enforce_budget(L=5.0, dilation=0.25)  # outer mu-loop, callable post hoc
-model.polish_exact(mu=1e2)                  # OPTIONAL exact tr(V K V^T) solve
+```
+Gamma(shat) = s_ref + V shat + Vbar p(shat),     V^T V = I,  V^T Vbar = 0,
 ```
 
-The per-feature gain is `(n||r_k|| - gamma_sp)_+^2 / c_k` with
-`c_k = n + gamma + mu E_k`, where `E_k` is the empirical Dirichlet energy of
-feature `k`, computed by the differentiated Arnoldi recurrence
-(`arnoldi_eval_grad`); the lifting columns are the group soft-thresholded
-`(1 - gamma_sp/(n||r_k||))_+ (n/c_k) r_k` of the one-step theorem. A useful
-scale for `mu` is `n / median_k(E_k)`, and `enforce_budget` finds it
-automatically for a prescribed Lipschitz budget `L`. See
-`experiments/stability_width_study.py` for the OOD sweep.
+whose nonlinear features `p` are multivariate orthogonal polynomials built by
+a Vandermonde-with-Arnoldi recurrence on the training coordinates, and whose
+lifting matrix `Vbar` is selected under a **certified Lipschitz budget**: the
+decoder's sensitivity on a dilated neighborhood of the training data is
+bounded by a user-prescribed constant `L`. The theory (multivariate Arnoldi
+features, the certificate, the Lipschitz budget Lagrangian with its one-step
+solution and closed-form calibration, and the greedy mode selection) is in
+`paper/.../sections/method.tex`; the numerical experiments are in
+`experiments/`.
+
+This repository is the manifold-learning project only. The reduced-order
+modeling on the manifold (Manifold Petrov-Galerkin Operator Inference,
+MPG-OpInf) lives in the separate `mpgopinf` project, which vendors this
+package.
+
+## Use
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)
+from greedyopm import GreedyOPM
+
+model = GreedyOPM(
+    r=10,            # reduced dimension
+    s=50,            # candidate pool of leading singular vectors (s > r)
+    p=[2, 3],        # polynomial degrees of the nonlinear features
+    L=100.0,         # Lipschitz budget (> 1); the only tuned hyperparameter
+    delta=0.1,       # extrapolation margin: certify on (1 + delta) * shat
+    n_reorth=4,      # Gram-Schmidt passes in the Arnoldi recurrence
+    n_grad_samples=250,   # gradient-probe subsample in the greedy loop
+).fit(S)             # S: (d, n) centered/normalized training snapshots
+
+S_hat = model.encode(S)                 # (r, n)
+S_rec = model.reconstruct(S)            # encode-decode
+model.reconstruction_error(S)           # relative Frobenius error
+model.certificate_                      # attained L_hat_Gamma(delta) <= L
+model.n_active_nonlinear                # active orthogonal-polynomial features
+model.set_budget(30.0)                  # closed-form recalibration at a new L
+                                        # (same modes; new active set / lifting)
+```
+
+## Layout
+
+```
+src/greedyopm/
+  greedy.py          GreedyOPM: greedy mode selection + budget-calibrated lifting
+  greedy_fixed.py    GreedyFixedOPM: all features active (unregularized ablation)
+  budget.py          calibrate_multiplier, shrink_factors, feature_gains, ...
+  polynomials/       multivariate Vandermonde-with-Arnoldi (build / eval / gradients)
+experiments/
+  lin_adv_diff/      periodic linear advection-diffusion, parametric in the wave speed
+  burgers2d/         2D viscous Burgers, parametric in the Reynolds number
+  navier_stokes2d/   NACA 0012 at Re = 1000, parametric in the angle of attack
+  budget_study.py, stability_study.py, plot_training_times.py
+tests/               pytest regression tests (budget calibration, Greedy-OPM)
+paper/               the manuscript (Overleaf submodule)
+```
+
+Each experiment directory has its own `README.md`, a `problem.py` (data and
+parametric splits), `methods.py` (the compared manifolds: POD, Greedy-QM,
+Greedy-CM, Geelen-QM, Greedy-OPM p=2 / p=3), `budget_select.py` (validation
+selection of `L`), `run_experiment.py` (resumable driver) and `plots.py`.
+
+```bash
+pixi install
+pixi run pytest tests -q
+python experiments/lin_adv_diff/run_experiment.py all
+```

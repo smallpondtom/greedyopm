@@ -76,10 +76,10 @@ METHOD_STYLES = {
 def build_model(name: str, S_train, r: int, cfg: dict = CFG, *, L=None):
     """Build and fit a single model on the training snapshots.
 
-    The reduced-coordinate snapshots are centered by the training row mean (see
-    :mod:`preprocess`); every method is fit on the centered data, and the
-    returned wrapper inverts the preprocessing at reconstruction so all reported
-    errors are full-state (the compression basis is an isometry on the span).
+    The snapshots are centered by the training row mean (see :mod:`preprocess`);
+    every method is fit on the centered data, and the returned wrapper inverts
+    the preprocessing at reconstruction so all reported errors are full-state
+    errors in the area-weighted (discrete L2) norm of :mod:`problem`.
     """
     normalizer = Normalizer().fit(S_train)
     N_train = normalizer.transform(S_train)

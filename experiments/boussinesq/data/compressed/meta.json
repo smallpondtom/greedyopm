@@ -1,0 +1,71 @@
+{
+  "K": 497,
+  "d": 344064,
+  "n_union": 1049,
+  "proj_residual": 4.0558568336775717e-07,
+  "sv_tol": 1e-07,
+  "sigma_ratio_first_dropped": 9.79576929025233e-08,
+  "blocks": [
+    {
+      "split": "train",
+      "Re": 250.0,
+      "n": 101
+    },
+    {
+      "split": "train",
+      "Re": 416.66666666666663,
+      "n": 101
+    },
+    {
+      "split": "train",
+      "Re": 583.3333333333333,
+      "n": 101
+    },
+    {
+      "split": "train",
+      "Re": 750.0,
+      "n": 101
+    },
+    {
+      "split": "val_interp",
+      "Re": 333.3333333333333,
+      "n": 81
+    },
+    {
+      "split": "val_interp",
+      "Re": 666.6666666666666,
+      "n": 81
+    },
+    {
+      "split": "val_extrap",
+      "Re": 1000.0,
+      "n": 81
+    },
+    {
+      "split": "test_interp",
+      "Re": 561.6327592946544,
+      "n": 201
+    },
+    {
+      "split": "test_extrap",
+      "Re": 1250.0,
+      "n": 201
+    }
+  ],
+  "config": {
+    "NX": 256,
+    "NY": 448,
+    "RE_MIN": 250.0,
+    "RE_MAX": 750.0,
+    "N_PARAMS_TRAIN": 4,
+    "SEED": 0,
+    "EXTRAP_FRAC": 1.0,
+    "VAL_EXTRAP_FRAC": 0.5,
+    "STORE": [
+      20,
+      25,
+      10
+    ]
+  },
+  "secs": 133.9
+}

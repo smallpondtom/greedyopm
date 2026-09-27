@@ -41,7 +41,7 @@ class Normalizer:
         )
         self.type = type
 
-    def fit(self, S: jnp.ndarraye) -> "Normalizer":
+    def fit(self, S: jnp.ndarray) -> "Normalizer":
         """Compute centering and scaling statistics from training data.
 
         Arguments

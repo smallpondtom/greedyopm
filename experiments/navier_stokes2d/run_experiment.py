@@ -1,9 +1,9 @@
 """NACA 0012 parametric (angle-of-attack) comparison experiment (driver).
 
 Compares POD, Greedy-QM, Greedy-CM, Geelen-QM, and the budget-calibrated
-Greedy-OPM (degrees {2} and {2, 3}) on the parametric NACA 0012 vortex-shedding
-problem of :mod:`problem`, over a range of angles of attack and with **two**
-test scenarios:
+Greedy-OPM (degrees {2} and {2, 3}) on the parametric NACA 0012 problem of
+:mod:`problem` (laminar SU2 data at Re_c = 1000, see ``run_param.py``), over a
+range of angles of attack and with **two** test scenarios:
 
 * ``test_interp`` -- a held-out interior angle (interpolation);
 * ``test_extrap`` -- a deep-stall angle beyond the training range
@@ -140,8 +140,6 @@ def run_plots(Ls: dict) -> None:
 def run_field(data: dict, S: dict, Ls: dict) -> None:
     from plots import field_panels
     g = prob.load_geom()
-    x, y = g["x"], g["y"]
-    extent = [float(x.min()), float(x.max()), float(y.min()), float(y.max())]
     models = {name: build_model(name, S["train"], R_FIELD, L=Ls.get(name))
               for name in METHOD_NAMES}
     for split, tag in (("test_interp", "interp"), ("test_extrap", "extrap")):
@@ -161,7 +159,7 @@ def run_field(data: dict, S: dict, Ls: dict) -> None:
         field_panels(
             speed(truth_col), recon, METHOD_NAMES,
             str(PLOTS / f"naca_field_{tag}"),
-            extent=extent, chi=g["chi"], rel_errs=rel,
+            geom=g, rel_errs=rel,
             title=rf"$\alpha={alpha:g}^\circ$ ({tag}olation test)",
         )
 
@@ -207,20 +205,20 @@ def run_report(data: dict, Ls: dict) -> dict:
     m = data["_meta"]
     report = dict(
         experiment="naca_parametric",
-        problem="2D NACA 0012 vortex shedding, Re=1000",
+        problem="2D NACA 0012, laminar SU2 at Re_c=1000 (angle-of-attack family)",
         parameter="angle of attack alpha (deg)",
         config=dict(
-            state_dim=int(m["d"]), K=int(m["K"]),
+            state_dim=int(m["d"]), n_nodes=int(m["n_nodes"]), K=int(m["K"]),
+            proj_residual=m["proj_residual"],
             n_train=int(data["train"]["S"].shape[1]),
             n_params_train=len(prob.TRAIN_ANGLES),
-            grid=[m["ny"], m["nx"]],
+            T_dev=m["T_dev"],
             train_range=[prob.ALPHA_MIN, prob.ALPHA_MAX],
             train_angles=prob.TRAIN_ANGLES,
             val_interp_angles=prob.VAL_INTERP_ANGLES,
             val_extrap_angle=prob.VAL_EXTRAP_ANGLE,
             test_interp_angle=prob.TEST_INTERP_ANGLE,
             test_extrap_angle=prob.TEST_EXTRAP_ANGLE,
-            proj_residual=m["proj_residual"],
             delta=CFG["delta"], s_pool=CFG["s_pool"],
             n_grad_samples=CFG["n_grad_samples"], r_max=R_MAX,
             r_budget=R_BUDGET),
@@ -241,9 +239,10 @@ def main(phase: str = "all") -> None:
     data = make_dataset()
     S = {sp: jnp.asarray(data[sp]["S"]) for sp in SPLITS}
     m = data["_meta"]
-    print(f"[naca] d={m['d']} K={m['K']} n_train={S['train'].shape[1]} "
-          f"({len(prob.TRAIN_ANGLES)} angles) proj_resid={m['proj_residual']:.1e} "
-          f"phase={phase}", flush=True)
+    print(f"[naca] d={m['d']} (n_nodes={m['n_nodes']}) K={m['K']} "
+          f"proj_resid={m['proj_residual']:.1e} n_train={S['train'].shape[1]} "
+          f"({len(prob.TRAIN_ANGLES)} angles, t >= {m['T_dev']:g}) phase={phase}",
+          flush=True)
     print(f"  train alpha:   {prob.TRAIN_ANGLES}", flush=True)
     print(f"  val_interp:    {prob.VAL_INTERP_ANGLES}   "
           f"val_extrap: {prob.VAL_EXTRAP_ANGLE}", flush=True)

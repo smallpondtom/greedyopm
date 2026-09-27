@@ -1,7 +1,7 @@
 """POD singular-value decay of the parametric (angle-of-attack) NACA dataset.
 
-Builds the velocity-field snapshot matrix from the developed window (t >= T_DEV)
-of every angle, and reports:
+Builds the (area-weighted) velocity snapshot matrix from the developed window
+(t >= T_DEV) of every SU2 run, and reports:
   (a) the normalized singular-value spectrum of the combined parametric manifold,
   (b) the relative projection (reconstruction) error vs reduced dimension r,
 contrasted with a single angle's own decay, to show that the parametric family
@@ -18,19 +18,20 @@ import matplotlib.pyplot as plt
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
 PLOTS = os.path.join(HERE, "plots")
-T_DEV = 15.0                     # keep the developed (post-transient) window
+import sys
+sys.path.insert(0, HERE)
+from problem import T_DEV, load_mesh  # noqa: E402
 
 
 def load_state(path):
-    """Return the developed-window velocity snapshots (2*ny*nx, k) and alpha."""
+    """Return the developed-window weighted velocity snapshots (2N, k) and alpha."""
     d = np.load(path)
-    t = d["t"]
-    keep = t >= T_DEV
-    u = d["u"][keep]             # (k, ny, nx)
-    v = d["v"][keep]
-    k = u.shape[0]
-    S = np.concatenate([u.reshape(k, -1), v.reshape(k, -1)], axis=1).T  # (2 ny nx, k)
-    return S.astype(np.float64), float(d["alpha_deg"])
+    keep = d["t"] >= T_DEV
+    w = load_mesh()["sqrt_w"]
+    u = d["u"][keep].astype(np.float64) * w
+    v = d["v"][keep].astype(np.float64) * w
+    S = np.concatenate([u, v], axis=1).T                    # (2N, k)
+    return S, float(d["alpha_deg"])
 
 
 def pod_error(S):
