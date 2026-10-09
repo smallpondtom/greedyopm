@@ -1,0 +1,17 @@
+data:
+  train_data_path: "Toy_data/data.npy" # npy file containing a numpy array of shape (D, mtrain)
+  test_data_path:  "Toy_data/data.npy" # npy file containing a numpy array of shape (D, mtest)
+  ntrain: -1 # to select the first ntrain colums in the array (D, mtrain) (ntrain<=mtrain)
+  ntest: -1 # to select the first ntest colums in the array (D, mtest) (ntest<=mtest)
+
+params:
+  method : "quadratic" # linear, quadratic, additive_am, sparse or low_rank
+  p : 3 # polynomial degree
+  N : 3 # dimension of the background space, not used if method  : "linear" or "quadratic"
+  n : 1 # dimension of the approximate manifold
+
+add_params:
+  compute_svd : True # If False, use precomputed basis of X_N stored in a npy file whose path is given by path_svd
+
+results_path: "SOTA/Results/"
+path_svd : ""  # path of the npy file containing a basis of X_N (numpy array of shape (D, N'), N'>=N) ; used if recompute_svd : False

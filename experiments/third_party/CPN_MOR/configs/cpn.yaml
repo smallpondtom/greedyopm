@@ -1,0 +1,26 @@
+data:
+  train_data_path: "Toy_data/data.npy" # npy file containing a numpy array of shape (D, mtrain)
+  test_data_path:  "Toy_data/data.npy" # npy file containing a numpy array of shape (D, mtest)
+  ntrain: -1 # to select the first ntrain colums in the array (D, mtrain) (ntrain<=mtrain), set ntrain : -1 for using the whole training set
+  ntest: -1 # to select the first ntest colums in the array (D, mtest) (ntest<=mtest)
+
+params:
+  approximation_type : "sparse" # "sparse" or "low_rank"
+  tolerance: 1e-10 # target precision
+  p: 3 # polynomial degree
+  train_val_set: 1. # percentage of training data, the rest is used for validation. No validation set if train_set : 1.
+
+add_params:
+  #tol_min: 1. # Required tolerance for the space X_n. This will define the minimal n. If tol_min : 1, then n = 1
+  n_min: 1 #This will directly define the minimal n. Comment either this parameter or tol_min to set an initial n.
+  alpha: 1 # defines the sequence of weights (w_i) with polynomial growth in i^alpha
+  beta: 0.7071
+  L: 100 # target Lipschitz constant of the decoder
+  compute_svd: True # If False, use precomputed basis of X_N stored in a npy file whose path is given by path_svd
+
+setting: "mean_squared" #or "worst_case"
+path_results: "Results"
+path_svd : "" # path of the npy file containing a basis of X_N (numpy array of shape (D, N'), N'>=N) ; used if recompute_svd = False
+
+plot:
+  indices_to_plot : [] # list of indices to plot (example [1, 2, 4])

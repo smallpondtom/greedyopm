@@ -22,10 +22,12 @@ import sys
 from pathlib import Path
 
 import jax
+import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))                        # baselines, problem
 sys.path.insert(0, str(_HERE.parent.parent / "src"))  # greedyopm
+sys.path.insert(0, str(_HERE.parent))               # cpn_baseline
 
 jax.config.update("jax_enable_x64", True)
 
@@ -62,13 +64,71 @@ OPM_DEGREES = {
     "Greedy-OPM (p=3)": [2, 3],
 }
 
+#: CPN-S (Bensalah, Nouy & Soffo 2026) is fitted by a tolerance sweep rather
+#: than at a prescribed r (see :mod:`cpn_baseline`), so it is not part of the
+#: r-sweep registry ``METHOD_NAMES``; it joins the comparison in the plots.
+CPN_NAME = "CPN-S"
+
+#: Display order of the error-vs-r curves.
+PLOT_METHODS = [
+    "POD",
+    "Geelen-QM",
+    CPN_NAME,
+    "Greedy-QM",
+    "Greedy-OPM (p=2)",
+    "Greedy-CM",
+    "Greedy-OPM (p=3)",
+]
+
+#: Display order of the active-feature bars (no POD; each plain greedy
+#: manifold sits immediately left of the Greedy-OPM of the same degree).
+#: CPN-S is left out: its count (distinct basis functions over 40 composed
+#: tail functions, see cpn_baseline) is not the same quantity; it is
+#: reported in the report JSON instead.
+BAR_METHODS = [
+    "Geelen-QM",
+    "Greedy-QM",
+    "Greedy-OPM (p=2)",
+    "Greedy-CM",
+    "Greedy-OPM (p=3)",
+]
+
+#: Legend text (the internal names above are the JSON keys and stay fixed).
+LEGEND_LABELS = {
+    "POD": "POD",
+    "Geelen-QM": "POD-Encoder QM",
+    "Greedy-QM": "Plain Greedy (p=2)",
+    "Greedy-CM": "Plain Greedy (p=3)",
+    "Greedy-OPM (p=2)": "Greedy-OPM (p=2)",
+    "Greedy-OPM (p=3)": "Greedy-OPM (p=3)",
+    CPN_NAME: "CPN-S (p=3)",
+}
+
+#: CPN-S settings: the released defaults of ``configs/cpn.yaml`` (degree 3,
+#: alpha = 1, beta = 0.7071, L = 100, n_min = 1, no internal validation
+#: split, mean-squared setting) with the background space ``X_N`` spanned by
+#: the same ``s_pool`` leading POD modes the greedy methods draw from.
+CPN_CFG = dict(
+    N=CFG["s_pool"],
+    p=3,
+    alpha=1.0,
+    beta=0.7071,
+    L=100.0,
+    n_min=1,
+    train_val_set=1.0,
+    index_set="total_degree",   # full degree-3 dictionary (their released
+                                # default is the hyperbolic cross, which has
+                                # no mixed cubic terms)
+)
+
 METHOD_STYLES = {
-    "POD":              dict(fmt="-o",  color="black",   lw=2.8, ms=7),
-    "Greedy-QM":        dict(fmt="--^", color="#1f77b4", lw=2.2, ms=7),
-    "Greedy-CM":        dict(fmt="--s", color="#2ca02c", lw=2.2, ms=7),
-    "Geelen-QM":        dict(fmt="--v", color="#ff7f0e", lw=2.2, ms=7),
-    "Greedy-OPM (p=2)": dict(fmt="-P",  color="#9467bd", lw=2.2, ms=8),
-    "Greedy-OPM (p=3)": dict(fmt="-D",  color="#d62728", lw=2.2, ms=7),
+    "POD":              dict(fmt="-o",  color="black",   lw=3.4, ms=10),
+    "Greedy-QM":        dict(fmt="--^", color="#1f77b4", lw=3.0, ms=10),
+    "Greedy-CM":        dict(fmt="--s", color="#2ca02c", lw=3.0, ms=10),
+    "Geelen-QM":        dict(fmt="--v", color="#ff7f0e", lw=3.0, ms=10),
+    "Greedy-OPM (p=2)": dict(fmt="-P",  color="#9467bd", lw=3.0, ms=11),
+    "Greedy-OPM (p=3)": dict(fmt="-D",  color="#d62728", lw=3.0, ms=10),
+    CPN_NAME:           dict(fmt="-.X", color="#8c564b", lw=3.0, ms=11),
 }
 
 
@@ -130,6 +190,22 @@ def build_model(name: str, S_train, r: int, cfg: dict = CFG, *, L=None):
         ).fit(N_train)
     else:
         raise ValueError(f"Unknown method {name!r}")
+    return PreprocessedModel(model, normalizer)
+
+
+def build_cpn(S_train, tol: float, *, n_max: int | None = None,
+              cfg: dict = CPN_CFG):
+    """Fit CPN-S (released code) at target tolerance ``tol``.
+
+    Same preprocessing as :func:`build_model`; the manifold dimension is an
+    outcome of ``tol`` (``model.n_``), the run is abandoned (``capped_``) if
+    more than ``n_max`` modes get promoted.
+    """
+    from cpn_baseline import CPNSparse
+
+    normalizer = Normalizer().fit(S_train)
+    N_train = np.asarray(normalizer.transform(S_train))
+    model = CPNSparse(tol, n_max=n_max, **cfg).fit(N_train)
     return PreprocessedModel(model, normalizer)
 
 
