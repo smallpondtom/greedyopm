@@ -88,10 +88,11 @@ the grid-adaptive sweep on `sqrt(e_val_interp * e_val_extrap)`.
 Preprocessing is centering by the training row mean only; errors are
 relative Frobenius errors of the stacked `[u; v; theta]` state.
 
-The fits run in the lossless compressed coordinates of `problem.py`
-(`K = 497` of 1049 union snapshots, projection residual `4e-7`, no `d x K`
-matrix is ever formed; `lift` streams through the cached files for the
-field panels).  The whole pipeline takes ~7 minutes on two CPU cores.
+All fits and errors are computed directly on the full `d = 344064` states
+(all five splits in memory, about 2.9 GB of snapshots plus the JAX copies;
+expect a peak of 10-12 GB).  Earlier versions ran in lossless compressed
+coordinates of the union snapshot span; that step has been removed and
+`data/compressed/` is no longer used.
 
 **Selected budgets:** `L*_{p=2} = 481.69`, `L*_{p=3} = 4183.03`.
 
@@ -149,5 +150,4 @@ Journal-ready numbers are in `plots/boussinesq_report.json`.
     python validate_solver.py --quick    # without the fine-grid run
     python run_experiment.py all         # budget -> sweep -> plots -> field -> report
 
-`data/compressed/` (a few MB) is enough for every phase except `field`,
-which lifts the reconstructions through the raw `data/*.npz`.
+Every phase needs the raw `data/*.npz` snapshot files (`generate_data.py`).

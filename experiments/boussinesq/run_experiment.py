@@ -27,10 +27,10 @@ Phases (resumable via the JSON checkpoints):
 * ``plots``  -- error-vs-r curves, active-feature bars, budget-study plot.
 * ``field``  -- temperature and speed field panels (interp + extrap).
 
-All fits and errors live in the lossless compressed coordinates of
-:mod:`problem` (``K``-dimensional, exact full-state errors); the field
-panels lift the reconstructions back to the ``256 x 448`` grid.
 * ``all``    -- everything above, in order.
+
+All fits and errors are computed directly on the full ``d = 344064``
+states (about 2.9 GB of snapshots in memory, plus JAX copies).
 """
 
 from __future__ import annotations
@@ -313,9 +313,7 @@ def run_field(data: dict, S: dict, Ls: dict, replot: bool = False) -> None:
     from plots import field_panels
 
     ext = [0.0, P.LX, 0.0, P.LY]
-    if replot or (all(_field_cache(sp).exists()
-                      for sp in ("test_interp", "test_extrap"))
-                  and not all(pth.exists() for *_, pth in P._blocks())):
+    if replot:
         for split in ("test_interp", "test_extrap"):
             z = np.load(_field_cache(split), allow_pickle=True)
             names = list(z["names"])
@@ -343,17 +341,19 @@ def run_field(data: dict, S: dict, Ls: dict, replot: bool = False) -> None:
         # quantity plotted in error-vs-r), not this one snapshot.
         pod = np.asarray(models["POD"].reconstruct(Sfull))
         truth = np.asarray(Sfull)
+        # per-snapshot error relative to the deviation from the training
+        # mean (the quantity the reported errors are normalized by)
+        mu = np.asarray(jnp.mean(S["train"], axis=1, keepdims=True))
         per_col = (np.linalg.norm(pod - truth, axis=0)
-                   / np.linalg.norm(truth, axis=0))
+                   / np.linalg.norm(truth - mu, axis=0))
         col = int(np.argmax(per_col))
-        # lift the truth and every reconstruction in one pass over the files
         cols = [truth[:, col]]
         rel = {}
         for name, model in models.items():
             cols.append(np.asarray(
                 model.reconstruct(Sfull[:, col:col + 1]))[:, 0])
             rel[name] = float(model.reconstruction_error(Sfull, relative=True))
-        full = P.lift(np.stack(cols, axis=1))                 # (d, 1 + n_methods)
+        full = np.stack(cols, axis=1)                         # (d, 1 + n_methods)
         truth_col = full[:, 0]
         cache = dict(names=np.array(list(models)), col=col,
                      rel=np.array([rel[nm] for nm in models]))
@@ -372,7 +372,7 @@ def run_field(data: dict, S: dict, Ls: dict, replot: bool = False) -> None:
             )
         np.savez_compressed(_field_cache(split), **cache)
         print(f"    field panels ({tag}): snapshot column {col} "
-              f"(t = {P.DT * P.STORE_EVERY_TEST * col:.2f}); lifted fields "
+              f"(t = {P.DT * P.STORE_EVERY_TEST * col:.2f}); fields "
               f"cached in {_field_cache(split).name}", flush=True)
 
 
@@ -391,19 +391,14 @@ def run_noise(S: dict, Ls: dict, d_full: int) -> dict:
         S_sigma = S_train + sigma * rms * Z,   Z_ij ~ N(0, 1) i.i.d.,
 
     where ``rms = ||S_train - mu||_F / sqrt(d_full n)`` is the entrywise RMS
-    of the centered training snapshots in the full state space (so ``sigma``
-    is the noise-to-signal ratio per entry) and ``Z`` is one fixed draw
-    (``NOISE_SEED``) shared by all methods and all ``sigma``.  Two errors are
+    of the centered training snapshots (so ``sigma`` is the noise-to-signal
+    ratio per entry) and ``Z`` is one fixed draw (``NOISE_SEED``) shared by
+    all methods and all ``sigma``.  Two errors are
     recorded: against the clean states, ``||S_train - G(E(S_sigma))|| /
     ||S_train - mu||`` (how much of the noise the manifold lets through),
     and against the noisy inputs, ``||S_sigma - G(E(S_sigma))|| /
     ||S_sigma - mu||`` (a plain encode-decode of the noisy data, which
-    carries the irreducible off-subspace noise for every method).  When the
-    states are compressed coordinates (Boussinesq) the noise is drawn in the
-    compressed space with the same entrywise standard deviation, which is
-    what full-state white noise looks like after the orthonormal
-    compression; its component orthogonal to the compressed space is
-    identical for all methods and only enters the second error.
+    carries the irreducible off-subspace noise for every method).
     """
     results = _load(CKPT)
     rec = results.get("_noise", {})
@@ -421,12 +416,10 @@ def run_noise(S: dict, Ls: dict, d_full: int) -> dict:
     err_clean = {name: [] for name in models}
     err_noisy = {name: [] for name in models}
     denom_clean = float(np.linalg.norm(S_tr - mu))
-    # Noise energy outside the stored state space (nonzero only when the
-    # states are compressed coordinates): full-state white noise has an
-    # expected energy sigma^2 rms^2 (d_full - d_state) n orthogonal to the
-    # compressed space, which no method sees or can represent; it is added
-    # analytically to the error against the noisy inputs so that this error
-    # means the same thing for compressed and uncompressed examples.
+    # Noise energy outside the stored state space: zero here (the states are
+    # the full states, d_state == d_full); kept for compatibility with runs
+    # on reduced coordinates, where it enters the error against the noisy
+    # inputs analytically.
     d_state = int(S_tr.shape[0])
     for sigma in NOISE_SIGMAS:
         S_sig = S_tr + float(sigma) * rms * Z
@@ -536,8 +529,6 @@ def run_report(data: dict, Ls: dict) -> dict:
         parameter="Reynolds number Re = U R / nu (Pr = 1)",
         config=dict(
             state_dim=int(data["_meta"]["d"]),
-            compressed_dim=int(data["_meta"]["K"]),
-            compression_residual=float(data["_meta"]["proj_residual"]),
             n_train=int(data["train"]["S"].shape[1]),
             n_params_train=len(data["train"]["Re"]),
             grid=[prob.NX, prob.NY], box=[prob.LX, prob.LY],
@@ -575,9 +566,11 @@ def run_report(data: dict, Ls: dict) -> dict:
 
 def main(phase: str = "all") -> None:
     data = make_dataset()
-    S = {sp: jnp.asarray(data[sp]["S"]) for sp in SPLITS}
-    print(f"[boussinesq] d={data['_meta']['d']} (compressed K="
-          f"{data['_meta']['K']}, residual {data['_meta']['proj_residual']:.1e}) "
+    S = {}
+    for sp in SPLITS:
+        S[sp] = jnp.asarray(data[sp]["S"])
+        data[sp]["S"] = S[sp]            # drop the NumPy copy (memory)
+    print(f"[boussinesq] d={data['_meta']['d']} (full state) "
           f"n_train={S['train'].shape[1]} "
           f"({len(data['train']['Re'])} Re x "
           f"{S['train'].shape[1] // len(data['train']['Re'])}) "

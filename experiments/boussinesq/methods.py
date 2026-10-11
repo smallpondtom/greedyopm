@@ -135,7 +135,7 @@ METHOD_STYLES = {
 def build_model(name: str, S_train, r: int, cfg: dict = CFG, *, L=None):
     """Build and fit a single model on the training snapshots.
 
-    The snapshots (compressed coordinates, see :mod:`problem`) are centered
+    The snapshots (full states, see :mod:`problem`) are centered
     by the training row mean (see :mod:`preprocess`); every method is fit on
     the centered data, and the returned wrapper inverts the preprocessing at
     reconstruction so all errors are exact full-state errors in physical

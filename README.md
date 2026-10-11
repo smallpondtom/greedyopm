@@ -3,23 +3,16 @@
 A nonlinear trial manifold for model reduction,
 
 ```
-Gamma(shat) = s_ref + V shat + Vbar p(shat),     V^T V = I,  V^T Vbar = 0,
+Gamma(shat) = s_ref + V shat + Bbar q(shat),     V^T V = I,  V^T Bbar = 0,
 ```
 
 whose nonlinear features `p` are multivariate orthogonal polynomials built by
 a Vandermonde-with-Arnoldi recurrence on the training coordinates, and whose
-lifting matrix `Vbar` is selected under a **certified Lipschitz budget**: the
+coefficient matrix `Bbar` is selected under a **certified Lipschitz budget**: the
 decoder's sensitivity on a dilated neighborhood of the training data is
-bounded by a user-prescribed constant `L`. The theory (multivariate Arnoldi
-features, the certificate, the Lipschitz budget Lagrangian with its one-step
-solution and closed-form calibration, and the greedy mode selection) is in
-`paper/.../sections/method.tex`; the numerical experiments are in
-`experiments/`.
+bounded by a user-prescribed budget `P`. 
 
-This repository is the manifold-learning project only. The reduced-order
-modeling on the manifold (Manifold Petrov-Galerkin Operator Inference,
-MPG-OpInf) lives in the separate `mpgopinf` project, which vendors this
-package.
+This repository contains the experiments to reproduce the results in the paper.
 
 ## Use
 
@@ -58,10 +51,9 @@ src/greedyopm/
 experiments/
   lin_adv_diff/      periodic linear advection-diffusion, parametric in the wave speed
   burgers2d/         2D viscous Burgers, parametric in the Reynolds number
-  navier_stokes2d/   NACA 0012 at Re = 1000, parametric in the angle of attack
-  budget_study.py, stability_study.py, plot_training_times.py
+  boussinesq/        2D Boussinesq rising thermal plume, parametric in the Rayleigh number
+  budget_study.py, stability_study.py, plot_training_times.py, cpn_baseline.py, ...
 tests/               pytest regression tests (budget calibration, Greedy-OPM)
-paper/               the manuscript (Overleaf submodule)
 ```
 
 Each experiment directory has its own `README.md`, a `problem.py` (data and

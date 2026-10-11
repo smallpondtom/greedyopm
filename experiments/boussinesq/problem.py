@@ -37,21 +37,13 @@ The whole range, including the extrapolation test, is resolved on the
 ``NX x NY`` grid; ``validate_solver.py`` checks this against a grid twice
 as fine at the largest Reynolds number used.
 
-Compression (lossless)
-----------------------
-``d = 344064`` is too large for the repeated ``d``-dimensional fits of the
-greedy loop, so, as in the NACA experiment, every split is compressed once
-to the orthonormal basis ``Q`` of the span of *all* splits' snapshots
-(centered by the training mean ``c``).  With ``X = [S_1 - c, ..., S_m - c]``
-and the eigendecomposition ``X^T X = V diag(sigma^2) V^T`` (method of
-snapshots, float64), ``Q = X V diag(1/sigma)`` and the reduced coordinates
-are ``A = Q^T X = diag(sigma) V^T`` -- so ``Q`` never has to be formed.
-``Q`` is an isometry on the span (the discarded eigenvalues are at
-round-off), so fitting and evaluating on ``A`` reports exact full-state
-errors; ``Q`` is a change of coordinates, never part of any decoder, and
-only the training split enters any fit.  :func:`lift` maps compressed
-columns back to ``(u, v, theta)`` by streaming through the cached files,
-``x = c + X (V diag(1/sigma) a)``.
+Data layout
+-----------
+``make_dataset`` loads the cached snapshot files of every split into memory
+in the full state dimension ``d = 3 Nx Ny = 344064`` (float64, about 2.9 GB
+for all five splits); all fits and errors are computed directly on these
+states, exactly as in ``lin_adv_diff`` and ``burgers2d``.  The files are
+written by ``generate_data.py``.
 """
 
 from __future__ import annotations
@@ -66,7 +58,8 @@ DATA = _HERE / "data"
 
 # ---- problem configuration --------------------------------------------------
 
-NX, NY = 256, 448        # grid (state dimension d = 3 NX NY = 344064)
+NX, NY = 256, 448        # grid
+D = 3 * NX * NY          # state dimension d = 344064
 LX, LY = 8.0, 14.0       # box in blob radii (dx = dy = 1/32)
 Y0 = 3.0                 # initial height of the blob (centred in x)
 R = 1.0                  # blob radius (the length scale)
@@ -100,7 +93,7 @@ def viscosity(Re: float) -> float:
 def solve_boussinesq(Re: float, store_every: int) -> Tuple[np.ndarray, dict]:
     """Snapshots ``[u; v; theta]`` for one Reynolds number (disk-cached)."""
     DATA.mkdir(parents=True, exist_ok=True)
-    cache = DATA / f"boussinesq_N{NX}x{NY}_Re{Re:.6g}_se{store_every}.npz"
+    cache = cache_path(float(Re), int(store_every))
     if cache.exists():
         z = np.load(cache)
         return z["S"], dict(X=z["X"], Y=z["Y"], tspan=z["tspan"],
@@ -181,165 +174,44 @@ def _stack(reynolds_numbers, se: int) -> Tuple[np.ndarray, dict]:
     return np.concatenate(blocks, axis=1), info
 
 
-def make_raw_dataset() -> Dict[str, dict]:
-    """The five splits in full state dimension (memory heavy, ~3 GB)."""
-    res = all_reynolds()
-    out = {}
-    for split in SPLITS:
-        S, info = _stack(res[split], store_every(split))
-        out[split] = dict(S=S, X=info["X"], Y=info["Y"],
-                          t=np.asarray(info["tspan"]), Re=res[split],
-                          field_shape=(NX, NY))
-    return out
+def make_dataset() -> Dict[str, dict]:
+    """The five splits in the full state dimension.
 
-
-# ---- lossless union-basis compression ---------------------------------------
-
-COMP = DATA / "compressed"
-SV_TOL = 1e-7            # keep sigma_i > SV_TOL * sigma_0 (lossless in practice)
-
-
-def _blocks() -> list:
-    """``[(split, Re, cache_path), ...]`` in the fixed union ordering."""
-    res = all_reynolds()
-    out = []
-    for split in SPLITS:
-        se = store_every(split)
-        for Re in res[split]:
-            out.append((split, float(Re),
-                        DATA / f"boussinesq_N{NX}x{NY}_Re{Re:.6g}_se{se}.npz"))
-    return out
-
-
-def _comp_key(split: str, Re: float) -> str:
-    return f"{split}_Re{Re:.6g}"
-
-
-def _build_compression(log=print) -> None:
-    import json
-    import time
-
-    blocks = _blocks()
-    missing = [p.name for *_, p in blocks if not p.exists()]
+    Every ``S`` is ``(d, n_split)`` float64 (about 2.9 GB in total).  All
+    snapshot files must already exist (``generate_data.py``); nothing is
+    recomputed here.
+    """
+    missing = [pth.name for *_, pth in cached_runs() if not pth.exists()]
     if missing:
         raise FileNotFoundError(f"missing cached runs {missing}; run "
                                 "generate_data.py first")
-    COMP.mkdir(parents=True, exist_ok=True)
-    t0 = time.time()
-    log("[compress] loading blocks ...", flush=True)
-    X = {i: np.load(p)["S"] for i, (*_, p) in enumerate(blocks)}
-    n_tr = sum(X[i].shape[1] for i, (sp, *_) in enumerate(blocks) if sp == "train")
-    c = sum(X[i].sum(axis=1, keepdims=True) for i, (sp, *_) in enumerate(blocks)
-            if sp == "train") / n_tr
-    for i in X:
-        X[i] -= c
-    counts = [X[i].shape[1] for i in range(len(blocks))]
-    offs = np.concatenate([[0], np.cumsum(counts)])
-    n = int(offs[-1])
-    log(f"[compress] d={X[0].shape[0]} n_union={n} ({time.time() - t0:.0f}s), "
-        "Gram matrix ...", flush=True)
-    G = np.zeros((n, n))
-    for i in range(len(blocks)):
-        for j in range(i, len(blocks)):
-            Gij = X[i].T @ X[j]
-            G[offs[i]:offs[i + 1], offs[j]:offs[j + 1]] = Gij
-            G[offs[j]:offs[j + 1], offs[i]:offs[i + 1]] = Gij.T
-    del X
-    w, V = np.linalg.eigh(G)
-    idx = np.argsort(w)[::-1]
-    w = np.clip(w[idx], 0.0, None)
-    V = V[:, idx]
-    sig = np.sqrt(w)
-    K = int(np.sum(sig > sig[0] * SV_TOL))
-    A = sig[:K, None] * V[:, :K].T                        # = Q^T X, (K, n)
-    resid = float(np.sqrt(w[K:].sum() / w.sum()))          # ||X - Q A|| / ||X||
-    for i, (sp, Re, _) in enumerate(blocks):
-        np.save(COMP / f"A_{_comp_key(sp, Re)}.npy", A[:, offs[i]:offs[i + 1]])
-    np.save(COMP / "V.npy", V[:, :K])
-    np.save(COMP / "sigma.npy", sig[:K])
-    np.save(COMP / "cmean.npy", c)
-    meta = dict(K=K, d=int(c.shape[0]), n_union=n, proj_residual=resid,
-                sv_tol=SV_TOL, sigma_ratio_first_dropped=(
-                    float(sig[K] / sig[0]) if K < n else None),
-                blocks=[dict(split=sp, Re=Re, n=int(cnt))
-                        for (sp, Re, _), cnt in zip(blocks, counts)],
-                config=dict(NX=NX, NY=NY, RE_MIN=RE_MIN, RE_MAX=RE_MAX,
-                            N_PARAMS_TRAIN=N_PARAMS_TRAIN, SEED=SEED,
-                            EXTRAP_FRAC=EXTRAP_FRAC,
-                            VAL_EXTRAP_FRAC=VAL_EXTRAP_FRAC,
-                            STORE=[STORE_EVERY_TRAIN, STORE_EVERY_VAL,
-                                   STORE_EVERY_TEST]),
-                secs=round(time.time() - t0, 1))
-    (COMP / "meta.json").write_text(json.dumps(meta, indent=2))
-    log(f"[compress] K={K} of {n}, projection residual {resid:.2e} "
-        f"({time.time() - t0:.0f}s)", flush=True)
-
-
-def _ensure_compression() -> dict:
-    import json
-
-    meta_path = COMP / "meta.json"
-    if meta_path.exists():
-        m = json.loads(meta_path.read_text())
-        want = [dict(split=sp, Re=Re) for sp, Re, _ in _blocks()]
-        have = [dict(split=b["split"], Re=b["Re"]) for b in m.get("blocks", [])]
-        if have == want and m.get("config", {}).get("NX") == NX \
-                and m["config"].get("STORE") == [STORE_EVERY_TRAIN,
-                                                 STORE_EVERY_VAL,
-                                                 STORE_EVERY_TEST]:
-            return m
-    _build_compression()
-    return json.loads(meta_path.read_text())
-
-
-def make_dataset() -> Dict[str, dict]:
-    """The five splits in compressed coordinates (``S`` = ``A = Q^T (S - c)``).
-
-    Every ``S`` is ``(K, n_split)``; errors computed on these are exact
-    full-state errors (see the module docstring).
-    """
-    meta = _ensure_compression()
     res = all_reynolds()
     out = {}
     for split in SPLITS:
-        parts = [np.load(COMP / f"A_{_comp_key(split, Re)}.npy")
-                 for Re in res[split]]
-        out[split] = dict(S=np.concatenate(parts, axis=1), Re=res[split],
-                          n_per=[int(p.shape[1]) for p in parts],
-                          field_shape=(NX, NY))
+        se = store_every(split)
+        parts = [np.load(cache_path(float(Re), se))["S"] for Re in res[split]]
+        S = parts[0] if len(parts) == 1 else np.concatenate(parts, axis=1)
+        del parts
+        out[split] = dict(S=np.ascontiguousarray(S, dtype=np.float64),
+                          Re=res[split], field_shape=(NX, NY))
         if len(res[split]) == 1:
             out[split]["nu"] = viscosity(res[split][0])
-    out["_meta"] = meta
+    out["_meta"] = dict(d=D, n_train=int(out["train"]["S"].shape[1]))
     return out
 
 
-_LIFT_CACHE: dict = {}
+make_raw_dataset = make_dataset
 
 
-def lift(cols: np.ndarray) -> np.ndarray:
-    """Map compressed columns ``(K, m)`` to full states ``(d, m)``.
+def cache_path(Re: float, se: int) -> Path:
+    return DATA / f"boussinesq_N{NX}x{NY}_Re{Re:.6g}_se{se}.npz"
 
-    ``x = c + X w`` with ``w = V diag(1/sigma) a``; the union snapshot matrix
-    ``X`` is streamed block by block from the cached files, so no ``d x K``
-    array is ever formed.
-    """
-    if "V" not in _LIFT_CACHE:
-        _LIFT_CACHE["V"] = np.load(COMP / "V.npy")
-        _LIFT_CACHE["sigma"] = np.load(COMP / "sigma.npy")
-        _LIFT_CACHE["c"] = np.load(COMP / "cmean.npy")
-    V, sig, c = (_LIFT_CACHE[k] for k in ("V", "sigma", "c"))
-    a = np.atleast_2d(np.asarray(cols, dtype=np.float64))
-    if a.shape[0] != V.shape[1]:
-        a = a.T
-    W = V @ (a / sig[:, None])                              # (n_union, m)
-    out = np.repeat(c, a.shape[1], axis=1)
-    off = 0
-    for _, _, p in _blocks():
-        Xb = np.load(p)["S"]
-        nb = Xb.shape[1]
-        out += (Xb - c) @ W[off:off + nb]
-        off += nb
-    return out
+
+def cached_runs() -> list:
+    """``[(split, Re, cache_path), ...]`` for every file the splits need."""
+    res = all_reynolds()
+    return [(split, float(Re), cache_path(float(Re), store_every(split)))
+            for split in SPLITS for Re in res[split]]
 
 
 # ---- field helpers ----------------------------------------------------------
