@@ -105,20 +105,31 @@ LEGEND_LABELS = {
 
 #: CPN-S settings: the released defaults of ``configs/cpn.yaml`` (degree 3,
 #: alpha = 1, beta = 0.7071, L = 100, n_min = 1, no internal validation
-#: split, mean-squared setting) with the background space ``X_N`` spanned by
-#: the same ``s_pool`` leading POD modes the greedy methods draw from.
+#: split, mean-squared setting), including their own choice of the
+#: background space ``X_N`` from the tolerance; only the reduced dimension
+#: is capped at ``n <= R_MAX`` by the tolerance sweep of the driver.
 CPN_CFG = dict(
-    N=CFG["s_pool"],
+    N=None,                         # their truncation rule: N = N(tol) is the
+                                    # smallest PCA truncation whose tail energy
+                                    # is <= (beta tol ||S||_F)^2 (Sec. 4.1);
+                                    # an integer would fix N instead
     p=3,
     alpha=1.0,
     beta=0.7071,
     L=100.0,
     n_min=1,
     train_val_set=1.0,
-    index_set="total_degree",   # full degree-3 dictionary (their released
-                                # default is the hyperbolic cross, which has
-                                # no mixed cubic terms)
+    index_set="hyperbolic_cross",   # the released default (prod(nu_k + 1)
+                                    # <= p + 1); "total_degree" is the
+                                    # full |nu|_1 <= p dictionary
 )
+
+
+def set_cpn_degree(p: int) -> None:
+    """Set the CPN-S polynomial degree (per layer) and its legend label."""
+    CPN_CFG["p"] = int(p)
+    LEGEND_LABELS[CPN_NAME] = f"CPN-S (p={int(p)})"
+
 
 METHOD_STYLES = {
     "POD":              dict(fmt="-o",  color="black",   lw=3.4, ms=10),

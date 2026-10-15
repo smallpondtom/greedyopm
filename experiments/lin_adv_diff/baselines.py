@@ -74,6 +74,25 @@ def cubic_features(S_hat: jnp.ndarray) -> jnp.ndarray:
 
 
 @jax.jit
+def quadratic_cubic_features(S_hat: jnp.ndarray) -> jnp.ndarray:
+    """All distinct monomials of total degree 2 and 3 (quadratic shell
+    followed by the cubic shell), the degree-{2, 3} counterpart of the
+    Greedy-OPM (p=3) feature set.
+
+    Arguments
+    ---------
+    S_hat : (r, n)
+
+    Returns
+    -------
+    P : (C(r+1, 2) + C(r+2, 3), n)
+    """
+    return jnp.concatenate(
+        [quadratic_features(S_hat), cubic_features(S_hat)], axis=0,
+    )
+
+
+@jax.jit
 def _ridge_fit_error(P: jnp.ndarray, B: jnp.ndarray, reg: float) -> jnp.ndarray:
     """Residual norm of the ridge fit  min_X ||X P - B||_F  (SVD filter).
 
@@ -285,15 +304,17 @@ class GreedyQM:
 
 
 class GreedyCM:
-    """Greedy cubic manifold: greedy mode selection + full cubic shell.
+    """Greedy cubic manifold: greedy mode selection + all monomials of
+    degree 2 and 3 (Plain Greedy (p=3)).
 
     Identical in structure to :class:`GreedyQM` but the nonlinear feature
-    map is the degree-3 monomial shell ``s_i s_j s_k`` (``i <= j <= k``)
-    instead of the quadratic one -- a pure cubic correction to the linear
-    POD part (``Gamma(s_hat) = s_ref + V s_hat + Vbar p_3(s_hat)``).  The
-    candidate modes are scored by the ridge-regularized least-squares fit of
-    the projection residual with cubic features of the trial coordinates,
-    and the final lifting refits the exact d-dimensional residual.
+    map is the full degree-{2, 3} monomial set (quadratic shell followed by
+    the cubic shell ``s_i s_j s_k``, ``i <= j <= k``), the same degrees as
+    Greedy-OPM (p=3): ``Gamma(s_hat) = s_ref + V s_hat + Vbar [p_2; p_3]``.
+    The candidate modes are scored by the ridge-regularized least-squares
+    fit of the projection residual with these features of the trial
+    coordinates, and the final lifting refits the exact d-dimensional
+    residual.
 
     Arguments
     ---------
@@ -357,7 +378,7 @@ class GreedyCM:
                 B_all.at[pos[int(j)], :].set(0.0) for j in candidates
             ])                                              # (n_cand, K, n)
 
-            P_batch = jax.vmap(cubic_features)(trials)      # (n_cand, m, n)
+            P_batch = jax.vmap(quadratic_cubic_features)(trials)  # (n_cand, m, n)
             errors = score_batch(P_batch, B_batch, self.reg)
             j_star = candidates[int(jnp.argmin(errors))]
             J.append(j_star)
@@ -368,7 +389,7 @@ class GreedyCM:
         S_hat = SigmaWt[jnp.asarray(J)]                     # (r, n)
         E = S_tilde - self.U_r_ @ S_hat
 
-        P = cubic_features(S_hat)
+        P = quadratic_cubic_features(S_hat)
         Us, sv, Vt = jnp.linalg.svd(P, full_matrices=False)
         filt = sv / (sv ** 2 + self.reg ** 2)
         self.Vbar_ = ((E @ Vt.T) * filt[None, :]) @ Us.T    # (d, m)
@@ -379,11 +400,11 @@ class GreedyCM:
         return self.U_r_.T @ (jnp.asarray(S) - self.s_ref_)
 
     def decode(self, S_hat: jnp.ndarray) -> jnp.ndarray:
-        """Cubic decoding with the full degree-3 monomial shell."""
+        """Decoding with all degree-2 and degree-3 monomials."""
         S_hat = jnp.asarray(S_hat)
         return (
             self.s_ref_ + self.U_r_ @ S_hat
-            + self.Vbar_ @ cubic_features(S_hat)
+            + self.Vbar_ @ quadratic_cubic_features(S_hat)
         )
 
     def reconstruct(self, S: jnp.ndarray) -> jnp.ndarray:
@@ -402,8 +423,16 @@ class GreedyCM:
 
     @property
     def n_active_nonlinear(self) -> int:
-        """The full cubic shell is always active: ``C(r+2, 3)``."""
-        return self.r * (self.r + 1) * (self.r + 2) // 6
+        """All degree-2 and degree-3 monomials are active:
+        ``C(r+1, 2) + C(r+2, 3)``."""
+        return (self.r * (self.r + 1) // 2
+                + self.r * (self.r + 1) * (self.r + 2) // 6)
+
+    @property
+    def active_degree_counts(self) -> dict:
+        """``{2: C(r+1, 2), 3: C(r+2, 3)}`` (the full set is active)."""
+        return {2: self.r * (self.r + 1) // 2,
+                3: self.r * (self.r + 1) * (self.r + 2) // 6}
 
 
 # ---------------------------------------------------------------------------

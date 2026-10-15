@@ -1,0 +1,28 @@
+% training time in seconds (fit at the selected budget / tolerance); inference time in milliseconds per snapshot
+% (median of 3 encode-decode passes over the test_interp split after one warm-up pass)
+% machine: Darwin arm64, arm
+\begin{table}[tb]
+  \centering
+  \caption{periodic linear advection-diffusion. Training time (s) and inference time (ms per snapshot) against the reduced dimension \( n \).}
+  \label{tab:lin_adv_diff_timings}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{rrrrrrrrrrrrrrr}
+    \toprule
+    \multirow{2}{*}{\( n \)} & \multicolumn{2}{c}{POD} & \multicolumn{2}{c}{POD-Encoder QM} & \multicolumn{2}{c}{CPN-S (p=3)} & \multicolumn{2}{c}{Plain Greedy (p=2)} & \multicolumn{2}{c}{Greedy-OPM (p=2)} & \multicolumn{2}{c}{Plain Greedy (p=3)} & \multicolumn{2}{c}{Greedy-OPM (p=3)} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13} \cmidrule(lr){14-15}
+     & training & inference & training & inference & training & inference & training & inference & training & inference & training & inference & training & inference \\
+    \midrule
+    1 & 0.13 & 0.003 & 0.41 & 0.003 & -- & -- & 0.54 & 0.003 & 0.45 & 0.003 & 0.35 & 0.004 & 0.49 & 0.004 \\
+    2 & 0.12 & 0.004 & 0.49 & 0.005 & 0.70 & 0.017 & 0.63 & 0.005 & 0.49 & 0.005 & 0.46 & 0.005 & 0.54 & 0.004 \\
+    3 & 0.13 & 0.004 & 0.50 & 0.005 & -- & -- & 0.65 & 0.004 & 0.52 & 0.005 & 0.50 & 0.005 & 0.56 & 0.005 \\
+    4 & 0.13 & 0.003 & 0.52 & 0.005 & 1.90 & 0.027 & 0.75 & 0.005 & 0.57 & 0.005 & 0.69 & 0.005 & 0.84 & 0.004 \\
+    5 & 0.20 & 0.005 & 0.63 & 0.004 & -- & -- & 0.83 & 0.005 & 0.59 & 0.005 & 1.13 & 0.004 & 0.96 & 0.006 \\
+    6 & 0.16 & 0.004 & 0.77 & 0.004 & 1.90 & 0.025 & 0.92 & 0.004 & 0.75 & 0.005 & 1.77 & 0.006 & 0.86 & 0.005 \\
+    7 & 0.17 & 0.004 & 0.60 & 0.004 & 5.70 & 0.044 & 1.00 & 0.005 & 0.68 & 0.006 & 3.01 & 0.005 & 1.10 & 0.006 \\
+    8 & 0.19 & 0.004 & 0.92 & 0.005 & 6.60 & 0.044 & 1.28 & 0.005 & 0.89 & 0.005 & 4.61 & 0.005 & 1.54 & 0.008 \\
+    9 & 0.17 & 0.004 & 0.75 & 0.004 & -- & -- & 1.62 & 0.005 & 0.97 & 0.005 & 6.68 & 0.005 & 2.18 & 0.010 \\
+    10 & 0.41 & 0.003 & 0.86 & 0.004 & 9.90 & 0.058 & 4.89 & 0.004 & 4.75 & 0.005 & 12.50 & 0.006 & 4.94 & 0.014 \\
+    \bottomrule
+  \end{tabular}
+\end{table}

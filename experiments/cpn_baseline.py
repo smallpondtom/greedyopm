@@ -193,13 +193,18 @@ class CPNSparse:
         (full degree-``p`` dictionary, see :func:`_find_n`).
     """
 
-    def __init__(self, tol: float, N: int, *, p: int = 3, alpha: float = 1.0,
+    def __init__(self, tol: float, N: int | None = None, *, p: int = 3,
+                 alpha: float = 1.0,
                  beta: float = 1.0 / np.sqrt(2.0), L: float = 100.0,
                  n_min: int = 1, train_val_set: float = 1.0,
                  n_max: int | None = None,
                  index_set: str = "hyperbolic_cross"):
         self.tol = float(tol)
-        self.N = int(N)
+        #: ``None`` = the released rule (Section 4.1 of the paper): ``N`` is
+        #: the smallest truncation whose PCA tail energy is at most
+        #: ``(beta * tol * ||S||_F)^2``, so ``N`` grows as ``tol`` tightens.
+        #: An integer fixes ``N`` instead.
+        self.N = None if N is None else int(N)
         self.p = int(p)
         self.alpha = float(alpha)
         self.beta = float(beta)
@@ -221,15 +226,22 @@ class CPNSparse:
         self.s_ref_ = sref[:, None]
 
         U, sig, _ = np.linalg.svd(S - Sref, full_matrices=False)
-        N = min(self.N, U.shape[1])
-        Vstar = np.ascontiguousarray(U[:, :N])
-        Qstar = Vstar.T @ (S - Sref)
+        method = CPN_S(S=S, Sref=Sref, tol_eps=self.tol, alpha=self.alpha,
+                       beta=self.beta, setting="mean_squared")
+        if self.N is None:
+            # their truncation rule (CPN_S.truncate_svd, prints silenced)
+            with contextlib.redirect_stdout(io.StringIO()):
+                Vstar, Qstar = method.truncate_svd(U)
+            Vstar = np.ascontiguousarray(Vstar)
+            N = int(Vstar.shape[1])
+        else:
+            N = min(self.N, U.shape[1])
+            Vstar = np.ascontiguousarray(U[:, :N])
+            Qstar = Vstar.T @ (S - Sref)
+        self.N_ = N
         self.sigma_ = sig
         self.pod_floor_rel_ = float(np.sqrt(np.sum(sig[N:] ** 2))
                                     / np.linalg.norm(S - Sref, "fro"))
-
-        method = CPN_S(S=S, Sref=Sref, tol_eps=self.tol, alpha=self.alpha,
-                       beta=self.beta, setting="mean_squared")
         tic = time.time()
         sink = io.StringIO()
         try:
@@ -328,7 +340,9 @@ class CPNSparse:
 
     def summary(self) -> dict:
         return dict(
-            tol=self.tol, N=self.N, p=self.p, alpha=self.alpha, beta=self.beta,
+            tol=self.tol, N=int(self.N_), N_rule=("fixed" if self.N is not None
+                                                 else "beta*tol truncation"),
+            p=self.p, alpha=self.alpha, beta=self.beta,
             L=self.L, n_min=self.n_min, train_val_set=self.train_val_set,
             index_set=self.index_set,
             n=int(self.n_), capped=bool(self.capped_),
@@ -374,14 +388,14 @@ def sweep_tolerances(build, evaluate, *, n_max: int, tol_hi: float = 0.5,
             return runs[tol]
         model = build(tol)
         if model.capped_:
-            rec = dict(tol=tol, n=int(model.n_), capped=True,
+            rec = dict(tol=tol, n=int(model.n_), N=int(model.N_), capped=True,
                        fit_secs=round(float(model.fit_secs_), 1))
         else:
             rec = dict(evaluate(model), **model.summary())
         runs[tol] = rec
         if checkpoint is not None:
             checkpoint([runs[t] for t in sorted(runs, reverse=True)])
-        log(f"    [cpn] tol={tol:.3e}  n={rec['n']:2d}"
+        log(f"    [cpn] tol={tol:.3e}  N={rec['N']:3d}  n={rec['n']:2d}"
             + ("  (capped)" if rec["capped"] else
                f"  train={rec['train']:.2e} t_in={rec['test_interp']:.2e} "
                f"t_ex={rec['test_extrap']:.2e} act={rec['n_active_nonlinear']}")

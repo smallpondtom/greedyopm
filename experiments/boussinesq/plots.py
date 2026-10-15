@@ -73,7 +73,7 @@ SPLIT_LABELS = {
 }
 
 #: Methods drawn as a degree-split stacked bar (quadratic + hatched cubic).
-_SPLIT_METHODS = ("Greedy-OPM (p=3)", "CPN-S")
+_SPLIT_METHODS = ("Greedy-CM", "Greedy-OPM (p=3)", "CPN-S")
 #: Methods whose nonlinear features are all cubic (hatched bars).
 _CUBIC_METHODS = ("Greedy-CM",)
 #: Hatch pattern marking degree-3 features.
@@ -367,7 +367,7 @@ def certificate_vs_budget(results, rs, opm_names, L_star, out_prefix,
 def field_panels(truth_img, recon_imgs, names, out_prefix, suptitle=None,
                  extent=None, xlabel="time $t$", ylabel="space $x$",
                  rel_errs=None, cell=3.3, aspect="auto", cmap="viridis",
-                 transpose=False, pair_pad=0.12, block_gap=1.25):
+                 transpose=False, pair_pad=0.12, block_gap=None):
     """4 x 4 panel: ground truth top-left, then per method the
     reconstruction (upper row of a pair) and |error| (lower row).
 
@@ -387,6 +387,10 @@ def field_panels(truth_img, recon_imgs, names, out_prefix, suptitle=None,
     names = list(names)
     if len(names) > 7:
         raise ValueError("field_panels draws at most 7 methods in a 4 x 4 grid")
+    if block_gap is None:
+        # room for the titles of the third row: one line without the error
+        # annotation, two lines with it
+        block_gap = 1.25 if rel_errs else 0.6
     if transpose:
         truth_img = np.asarray(truth_img).T
         recon_imgs = {nm: np.asarray(v).T for nm, v in recon_imgs.items()}

@@ -62,15 +62,62 @@ from methods import (  # noqa: E402
     build_cpn,
     build_model,
     n_active,
+    set_cpn_degree,
 )
 import problem as P  # noqa: E402
 from problem import SPLITS, make_dataset  # noqa: E402
 from budget_select import select_budget  # noqa: E402
+from timing_table import (collect_timings, time_inference,  # noqa: E402
+                          write_timings)
+from field_consistent import (SPLITS_FIELD, consistent_models,  # noqa: E402
+                              copy_from_tag, load_field_cache,
+                              save_field_cache)
 
 PLOTS = _HERE / "plots"
 CKPT = PLOTS / "boussinesq_results.json"
 CKPT_BUDGET = PLOTS / "boussinesq_budget_study.json"
 REPORT = PLOTS / "boussinesq_report.json"
+TIMINGS = PLOTS / "boussinesq_timings"
+
+#: Split on which the inference time is measured.
+INFER_SPLIT = "test_interp"
+
+
+def configure_output(tag: str | None) -> None:
+    """Direct every checkpoint and figure to ``plots/<tag>`` (``plots`` when
+    ``tag`` is empty)."""
+    global PLOTS, CKPT, CKPT_BUDGET, REPORT, TIMINGS
+    PLOTS = _HERE / "plots" / tag if tag else _HERE / "plots"
+    CKPT = PLOTS / "boussinesq_results.json"
+    CKPT_BUDGET = PLOTS / "boussinesq_budget_study.json"
+    REPORT = PLOTS / "boussinesq_report.json"
+    TIMINGS = PLOTS / "boussinesq_timings"
+
+
+def seed_from(src_tag: str) -> None:
+    """Reuse the budget selection and the r-sweep of ``plots/<src_tag>``.
+
+    Only the method entries ``<name>@r=<r>`` of the registry methods and the
+    budget study are copied (never the CPN-S runs, the noise study or the
+    field caches), so a run with a different CPN-S degree shares exactly the
+    same fits of the other methods."""
+    src = _HERE / "plots" / src_tag
+    src_ckpt = src / CKPT.name
+    src_budget = src / CKPT_BUDGET.name
+    if CKPT.exists() or CKPT_BUDGET.exists():
+        print(f"  [seed] {PLOTS.name} already has checkpoints; not seeding",
+              flush=True)
+        return
+    if not (src_ckpt.exists() and src_budget.exists()):
+        raise FileNotFoundError(f"nothing to seed from in {src}")
+    res = _load(src_ckpt)
+    keep = {k: v for k, v in res.items()
+            if "@r=" in k and k.split("@r=")[0] in METHOD_NAMES}
+    keep["_meta"] = res.get("_meta", {})
+    _save(CKPT, keep)
+    _save(CKPT_BUDGET, _load(src_budget))
+    print(f"  [seed] copied budget study and {len(keep) - 1} sweep entries "
+          f"from {src.name}", flush=True)
 
 R_MAX = 10
 RS = list(range(1, R_MAX + 1))
@@ -115,9 +162,21 @@ def _save(path: Path, obj: dict) -> None:
     os.replace(tmp, path)
 
 
+def _sync(model) -> None:
+    """Wait for every array attribute of a fitted model (fit timing)."""
+    inner = getattr(model, "model", model)
+    for v in vars(inner).values():
+        if isinstance(v, jax.Array):
+            v.block_until_ready()
+
+
 def _evaluate(model, S: dict) -> dict:
-    return {sp: model.reconstruction_error(S[sp], relative=True)
-            for sp in SPLITS}
+    """Relative reconstruction errors of a fitted model on all splits, plus
+    the inference time of one encode-decode pass over ``INFER_SPLIT``."""
+    out = {sp: model.reconstruction_error(S[sp], relative=True)
+           for sp in SPLITS}
+    out.update(time_inference(model, S[INFER_SPLIT]))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +225,16 @@ def run_sweep(S: dict, Ls: dict) -> dict:
                 continue
             tic = time.time()
             model = build_model(name, S["train"], r, L=Ls.get(name))
+            _sync(model)                      # JAX dispatch is asynchronous
+            fit_secs = time.time() - tic
+            tic = time.time()
             rec = dict(method=name, r=r, **_evaluate(model, S),
                        n_active=n_active(model),
                        n_active_by_degree=active_by_degree(model),
                        certificate=getattr(model, "certificate_", None),
                        lambda_=getattr(model, "lambda_", None),
-                       secs=round(time.time() - tic, 1))
+                       secs=round(fit_secs, 3),
+                       eval_secs=round(time.time() - tic, 3))
             results[key] = rec
             _save(CKPT, results)
             print(f"  r={r:2d}  {name:18s} "
@@ -231,7 +294,11 @@ def run_cpn(S: dict) -> dict:
             n_active=int(rec["n_active_nonlinear"]),
             n_active_by_degree=rec["n_active_by_degree"],
             certificate=None, lambda_=None, secs=rec["fit_secs"],
-            tol=rec["tol"], n_nonzero_coeffs=rec["n_nonzero_coeffs"],
+            infer_secs=rec.get("infer_secs"),
+            infer_secs_per_snapshot=rec.get("infer_secs_per_snapshot"),
+            infer_n_snapshots=rec.get("infer_n_snapshots"),
+            tol=rec["tol"], N=rec.get("N"),
+            n_nonzero_coeffs=rec["n_nonzero_coeffs"],
             n_learnt_tail=rec["n_learnt_tail"],
             cpn_lipschitz=rec["cpn_lipschitz"],
             pod_floor_rel=rec["pod_floor_rel"])
@@ -304,76 +371,122 @@ def _field_cache(split: str) -> Path:
     return PLOTS / f"boussinesq_field_{split}.npz"
 
 
-def run_field(data: dict, S: dict, Ls: dict, replot: bool = False) -> None:
-    """Field panels.  The lifted fields (truth + every method, theta and
-    speed) are cached in ``plots/boussinesq_field_<split>.npz`` so the panels
-    can be re-plotted without the raw snapshot files or any refit
-    (``run_experiment.py fieldplot``, or ``field`` when the cache exists and
-    the raw files are missing)."""
+def _field_models_cache() -> Path:
+    """Raw reconstructions of the models behind the panels (see
+    :mod:`field_consistent`)."""
+    return PLOTS / f"boussinesq_field_models.npz"
+
+
+def _prepare_field(S: dict, Ls: dict, from_tag: str | None):
+    """Load the reconstruction cache, optionally reuse another folder's
+    models, and fit whatever is still missing; the fits replace the
+    ``r = R_FIELD`` sweep entries so curves and panels agree."""
+    results = _load(CKPT)
+    cache = load_field_cache(_field_models_cache())
+    if from_tag:
+        src = _HERE / "plots" / from_tag
+        copy_from_tag(src / _field_models_cache().name, src / CKPT.name, cache,
+                      results, R=R_FIELD, method_names=METHOD_NAMES,
+                      cpn_name=CPN_NAME, log=print)
+    cached = {nm for nm in PLOT_METHODS
+              if all(nm in cache[sp]["recon"] for sp in SPLITS_FIELD)}
+    models = consistent_models(
+        S, Ls, results, cached, R=R_FIELD, plot_methods=PLOT_METHODS,
+        cpn_name=CPN_NAME, build_model=build_model, build_cpn=build_cpn,
+        evaluate=_evaluate, n_active=n_active,
+        active_by_degree=active_by_degree, sync=_sync, log=print)
+    _save(CKPT, results)
+    return cache, models
+
+
+def _hardest_column(S_split, pod_model, mu=None) -> int:
+    """Snapshot least captured by the linear POD subspace at ``R_FIELD``
+    (a method-agnostic difficulty measure); the relative error is taken
+    w.r.t. the deviation from ``mu`` when given."""
+    truth = np.asarray(S_split)
+    pod = np.asarray(pod_model.reconstruct(S_split))
+    ref = truth if mu is None else truth - mu
+    per_col = np.linalg.norm(pod - truth, axis=0) / np.linalg.norm(ref, axis=0)
+    return int(np.argmax(per_col))
+
+
+_FIELD_KINDS = (("theta", "inferno"), ("speed", "viridis"))
+
+
+def _draw_field_bou(split: str, names: list, truth_col, recon_cols: dict,
+                    col: int) -> None:
     from plots import field_panels
 
     ext = [0.0, P.LX, 0.0, P.LY]
-    if replot:
-        for split in ("test_interp", "test_extrap"):
-            z = np.load(_field_cache(split), allow_pickle=True)
-            names = list(z["names"])
-            rel = {nm: float(v) for nm, v in zip(names, z["rel"])}
-            for kind, cmap in (("theta", "inferno"), ("speed", "viridis")):
-                recon = {nm: z[f"{kind}_{i}"] for i, nm in enumerate(names)}
-                field_panels(
-                    z[f"{kind}_truth"], recon, names,
-                    str(PLOTS / f"boussinesq_{kind}_{split}"),
-                    extent=ext, rel_errs=rel, xlabel=r"$x$", ylabel=r"$y$",
-                    aspect="equal", cmap=cmap, transpose=True,
-                )
-            print(f"    field panels ({split}) re-plotted from the cache "
-                  f"(snapshot column {int(z['col'])})", flush=True)
-        return
+    out = dict(names=np.array(names), col=np.array(col))
+    for kind, cmap in _FIELD_KINDS:
+        fn = P.temperature if kind == "theta" else P.speed
+        truth_img = np.asarray(fn(truth_col))
+        recon_img = {nm: np.asarray(fn(recon_cols[nm])) for nm in names}
+        field_panels(
+            truth_img, recon_img, names,
+            str(PLOTS / f"boussinesq_{kind}_{split}"),
+            extent=ext, xlabel=r"$x$", ylabel=r"$y$",
+            aspect="equal", cmap=cmap, transpose=True,
+        )
+        out[f"{kind}_truth"] = truth_img
+        for i, nm in enumerate(names):
+            out[f"{kind}_{i}"] = recon_img[nm]
+    np.savez_compressed(_field_cache(split), **out)
 
-    models = _field_models(S, Ls)
-    for split, tag in (("test_interp", "interpolated"),
-                       ("test_extrap", "extrapolated")):
-        Sfull = S[split]
-        # Show the *hardest* snapshot -- the one least captured by the linear
-        # POD subspace (a method-agnostic difficulty measure) -- rather than a
-        # fixed time index; see burgers2d for the rationale.  The annotated
-        # relative error is the error over the *entire* test split (the same
-        # quantity plotted in error-vs-r), not this one snapshot.
-        pod = np.asarray(models["POD"].reconstruct(Sfull))
-        truth = np.asarray(Sfull)
-        # per-snapshot error relative to the deviation from the training
-        # mean (the quantity the reported errors are normalized by)
-        mu = np.asarray(jnp.mean(S["train"], axis=1, keepdims=True))
-        per_col = (np.linalg.norm(pod - truth, axis=0)
-                   / np.linalg.norm(truth - mu, axis=0))
-        col = int(np.argmax(per_col))
-        cols = [truth[:, col]]
-        rel = {}
-        for name, model in models.items():
-            cols.append(np.asarray(
-                model.reconstruct(Sfull[:, col:col + 1]))[:, 0])
-            rel[name] = float(model.reconstruction_error(Sfull, relative=True))
-        full = np.stack(cols, axis=1)                         # (d, 1 + n_methods)
-        truth_col = full[:, 0]
-        cache = dict(names=np.array(list(models)), col=col,
-                     rel=np.array([rel[nm] for nm in models]))
-        for kind, fn, cmap in (("theta", P.temperature, "inferno"),
-                               ("speed", P.speed, "viridis")):
-            recon = {name: fn(full[:, 1 + i])
-                     for i, name in enumerate(models)}
-            cache[f"{kind}_truth"] = np.asarray(fn(truth_col))
-            for i, name in enumerate(models):
-                cache[f"{kind}_{i}"] = np.asarray(recon[name])
+
+def _replot_field() -> None:
+    """Re-render the field panels from the cached images (no refit)."""
+    from plots import field_panels
+
+    ext = [0.0, P.LX, 0.0, P.LY]
+    for split in SPLITS_FIELD:
+        z = np.load(_field_cache(split), allow_pickle=True)
+        names = list(z["names"])
+        for kind, cmap in _FIELD_KINDS:
+            recon = {nm: z[f"{kind}_{i}"] for i, nm in enumerate(names)}
             field_panels(
-                fn(truth_col), recon, list(models),
+                z[f"{kind}_truth"], recon, names,
                 str(PLOTS / f"boussinesq_{kind}_{split}"),
-                extent=ext, rel_errs=rel, xlabel=r"$x$", ylabel=r"$y$",
+                extent=ext, xlabel=r"$x$", ylabel=r"$y$",
                 aspect="equal", cmap=cmap, transpose=True,
             )
-        np.savez_compressed(_field_cache(split), **cache)
-        print(f"    field panels ({tag}): snapshot column {col} "
-              f"(t = {P.DT * P.STORE_EVERY_TEST * col:.2f}); fields "
-              f"cached in {_field_cache(split).name}", flush=True)
+        print(f"    field panels ({split}) re-plotted from the cache "
+              f"(snapshot column {int(z['col'])})", flush=True)
+
+
+def run_field(data: dict, S: dict, Ls: dict, replot: bool = False,
+              from_tag: str | None = None) -> None:
+    """Temperature and speed panels on both test splits, drawn from the same
+    fitted models as the error-vs-n curves (the fits made here replace the
+    ``r = R_FIELD`` sweep entries).  The snapshot shown is the one least
+    captured by the linear POD subspace, relative to the deviation from the
+    training mean.  ``from_tag`` reuses the models of another output folder
+    for every method but CPN-S."""
+    if replot:
+        _replot_field()
+        return
+    cache, models = _prepare_field(S, Ls, from_tag)
+    mu = np.asarray(jnp.mean(S["train"], axis=1, keepdims=True))
+    for split in SPLITS_FIELD:
+        Sfull = S[split]
+        if cache[split]["col"] is None:
+            if "POD" not in models:
+                raise RuntimeError("field cache has no snapshot column and "
+                                   "POD was not refit; delete the cache")
+            cache[split]["col"] = _hardest_column(Sfull, models["POD"], mu)
+        col = int(cache[split]["col"])
+        truth_col = np.asarray(Sfull[:, col])
+        cache[split]["truth"] = truth_col
+        for name, model in models.items():
+            cache[split]["recon"][name] = np.asarray(
+                model.reconstruct(Sfull[:, col:col + 1]))[:, 0]
+        names = [nm for nm in PLOT_METHODS if nm in cache[split]["recon"]]
+        _draw_field_bou(split, names, truth_col,
+                        {nm: cache[split]["recon"][nm] for nm in names}, col)
+        print(f"    field panels ({split}): snapshot column {col} "
+              f"(t = {P.DT * P.STORE_EVERY_TEST * col:.2f})", flush=True)
+    save_field_cache(_field_models_cache(), cache)
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +613,7 @@ def run_report(data: dict, Ls: dict) -> dict:
 
     # CPN-S: tolerance sweep and the per-r selections
     cpn = results.get("_cpn_sweep", {})
-    cpn_keys = ("tol", "n", "capped", "fit_secs", "train", "val_interp",
+    cpn_keys = ("tol", "n", "N", "capped", "fit_secs", "train", "val_interp",
                 "val_extrap", "test_interp", "test_extrap",
                 "n_active_nonlinear", "n_active_by_degree", "n_nonzero_coeffs",
                 "n_learnt_tail", "cpn_lipschitz", "pod_floor_rel")
@@ -511,7 +624,7 @@ def run_report(data: dict, Ls: dict) -> dict:
                for run in cpn.get("runs", [])],
         selected_by_r={
             str(r): {k: results[f"{CPN_NAME}@r={r}"].get(k)
-                     for k in ("tol", *SPLITS, "n_active",
+                     for k in ("tol", "N", *SPLITS, "n_active",
                                "n_active_by_degree", "n_nonzero_coeffs",
                                "n_learnt_tail", "cpn_lipschitz", "secs")}
             for r in RS if f"{CPN_NAME}@r={r}" in results},
@@ -552,7 +665,30 @@ def run_report(data: dict, Ls: dict) -> dict:
         cpn=cpn_section,
         noise=results.get("_noise"),
     )
+    report["inference_times_s_per_snapshot"] = {
+        name: {r: row["inference_s_per_snapshot"] for r, row in rows.items()}
+        for name, rows in collect_timings(results, METHOD_NAMES, RS,
+                                          CPN_NAME).items()}
     _save(REPORT, report)
+
+    # training / inference timings: JSON + CSV + LaTeX table
+    import platform
+    from methods import LEGEND_LABELS
+    timings = collect_timings(results, METHOD_NAMES, RS, CPN_NAME)
+    order = [m for m in PLOT_METHODS if m in timings and timings[m]]
+    timings = {m: timings[m] for m in order}
+    write_timings(timings, str(TIMINGS), RS, LEGEND_LABELS, meta=dict(
+        experiment="boussinesq", title=report["problem"],
+        infer_split=INFER_SPLIT,
+        infer_repeats=next((rec.get("infer_repeats") for rec in results.values()
+                            if isinstance(rec, dict) and rec.get("infer_repeats")),
+                           None),
+        cpn_degree=CPN_CFG["p"], cpn_index_set=CPN_CFG["index_set"],
+        machine=f"{platform.system()} {platform.machine()}, "
+                f"{platform.processor() or 'cpu'}",
+    ))
+    print(f"    saved {TIMINGS.name}.json/.csv and {TIMINGS.name}_table.tex",
+          flush=True)
     ok = all(v["all_valid"] for v in certificate_validity.values())
     print(f"    saved {REPORT.name}  (certificate <= budget for all r: {ok})",
           flush=True)
@@ -564,7 +700,16 @@ def run_report(data: dict, Ls: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def main(phase: str = "all") -> None:
+def main(phase: str = "all", *, tag: str | None = None,
+         cpn_p: int | None = None, seed: str | None = None,
+         field_from: str | None = None) -> None:
+    configure_output(tag)
+    if cpn_p is not None:
+        set_cpn_degree(cpn_p)
+    if seed:
+        seed_from(seed)
+    print(f"[boussinesq] output -> {PLOTS}  CPN-S p={CPN_CFG['p']} "
+          f"({CPN_CFG['index_set']})", flush=True)
     data = make_dataset()
     S = {}
     for sp in SPLITS:
@@ -596,7 +741,7 @@ def main(phase: str = "all") -> None:
     if phase in ("all", "plots"):
         run_plots(Ls)
     if phase in ("all", "field"):
-        run_field(data, S, Ls)
+        run_field(data, S, Ls, from_tag=field_from)
     if phase == "fieldplot":
         run_field(data, S, Ls, replot=True)
     if phase in ("all", "plots", "report"):
@@ -604,7 +749,31 @@ def main(phase: str = "all") -> None:
     print("DONE")
 
 
+def _cli():
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("phase", nargs="?", default="all",
+                    help="budget | sweep | cpn | noise | plots | field | "
+                         "fieldplot | report | all")
+    ap.add_argument("--tag", default=None,
+                    help="write every checkpoint and figure to plots/<tag>")
+    ap.add_argument("--cpn-p", type=int, default=None,
+                    help="CPN-S polynomial degree per layer (default: "
+                         f"{CPN_CFG['p']})")
+    ap.add_argument("--field-from", default=None, metavar="TAG",
+                    help="field phase: reuse the fitted models (cached "
+                         "reconstructions and r = R_FIELD sweep entries) of "
+                         "plots/<TAG> for every method but CPN-S")
+    ap.add_argument("--seed-from", default=None, metavar="TAG",
+                    help="reuse the budget selection and r-sweep of "
+                         "plots/<TAG> (CPN-S, noise and field are rerun)")
+    return ap.parse_args()
+
+
 if __name__ == "__main__":
     t0 = time.time()
-    main(sys.argv[1] if len(sys.argv) > 1 else "all")
+    _args = _cli()
+    main(_args.phase, tag=_args.tag, cpn_p=_args.cpn_p, seed=_args.seed_from,
+         field_from=_args.field_from)
     print(f"[boussinesq] elapsed {time.time() - t0:.1f}s")

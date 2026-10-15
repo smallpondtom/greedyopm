@@ -1,0 +1,28 @@
+% training time in seconds (fit at the selected budget / tolerance); inference time in milliseconds per snapshot
+% (median of 3 encode-decode passes over the test_interp split after one warm-up pass)
+% machine: Darwin arm64, arm
+\begin{table}[tb]
+  \centering
+  \caption{2D viscous Burgers. Training time (s) and inference time (ms per snapshot) against the reduced dimension \( n \).}
+  \label{tab:burgers2d_timings}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{rrrrrrrrrrrrrrr}
+    \toprule
+    \multirow{2}{*}{\( n \)} & \multicolumn{2}{c}{POD} & \multicolumn{2}{c}{POD-Encoder QM} & \multicolumn{2}{c}{CPN-S (p=4)} & \multicolumn{2}{c}{Plain Greedy (p=2)} & \multicolumn{2}{c}{Greedy-OPM (p=2)} & \multicolumn{2}{c}{Plain Greedy (p=3)} & \multicolumn{2}{c}{Greedy-OPM (p=3)} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13} \cmidrule(lr){14-15}
+     & training & inference & training & inference & training & inference & training & inference & training & inference & training & inference & training & inference \\
+    \midrule
+    1 & 0.35 & 0.065 & 0.64 & 0.081 & 0.80 & 0.258 & 0.72 & 0.083 & 0.69 & 0.082 & 0.58 & 0.093 & 0.75 & 0.095 \\
+    2 & 0.36 & 0.075 & 0.85 & 0.104 & 1.30 & 0.184 & 0.91 & 0.101 & 0.75 & 0.103 & 0.67 & 0.091 & 0.80 & 0.090 \\
+    3 & 0.37 & 0.076 & 0.83 & 0.092 & 2.00 & 0.162 & 0.90 & 0.093 & 0.78 & 0.091 & 0.74 & 0.091 & 1.02 & 0.095 \\
+    4 & 0.38 & 0.066 & 0.89 & 0.083 & 0.10 & 0.187 & 1.00 & 0.081 & 0.85 & 0.083 & 0.85 & 0.083 & 1.11 & 0.083 \\
+    5 & 0.40 & 0.066 & 1.13 & 0.084 & 2.10 & 0.176 & 1.07 & 0.083 & 0.91 & 0.081 & 1.18 & 0.083 & 1.21 & 0.085 \\
+    6 & 0.55 & 0.068 & 1.14 & 0.084 & 2.80 & 0.180 & 1.32 & 0.084 & 1.02 & 0.084 & 1.75 & 0.087 & 1.42 & 0.092 \\
+    7 & 0.49 & 0.068 & 1.31 & 0.087 & 1.10 & 0.201 & 1.23 & 0.083 & 0.98 & 0.085 & 3.56 & 0.091 & 1.67 & 0.093 \\
+    8 & 0.41 & 0.067 & 1.38 & 0.082 & 3.60 & 0.238 & 1.34 & 0.086 & 1.10 & 0.082 & 4.51 & 0.097 & 1.45 & 0.099 \\
+    9 & 0.43 & 0.068 & 1.35 & 0.085 & 4.60 & 0.242 & 1.55 & 0.085 & 1.06 & 0.075 & 5.66 & 0.104 & 1.89 & 0.073 \\
+    10 & 0.62 & 0.033 & 1.60 & 0.086 & 4.70 & 0.250 & 5.43 & 0.090 & 5.48 & 0.060 & 7.65 & 0.117 & 4.88 & 0.071 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
