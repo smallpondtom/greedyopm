@@ -61,8 +61,19 @@ parametric splits), `methods.py` (the compared manifolds: POD, Greedy-QM,
 Greedy-CM, Geelen-QM, Greedy-OPM p=2 / p=3), `budget_select.py` (validation
 selection of `L`), `run_experiment.py` (resumable driver) and `plots.py`.
 
+## Reproducing the experiments
+
 ```bash
 pixi install
 pixi run pytest tests -q
 python experiments/lin_adv_diff/run_experiment.py all
 ```
+
+To reproduce the full experiment results in the accompanying paper, run:
+
+```bash
+pixi install
+bash experiments/run_all.sh
+```
+
+Note that we assume that the user has a working installation of [`pixi`](https://pixi.prefix.dev/latest/).
