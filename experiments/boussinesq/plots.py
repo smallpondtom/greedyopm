@@ -160,6 +160,7 @@ def error_vs_r(results, rs, methods, out_prefix, suptitle=None,
         _despine(ax)
     axes[0].set_ylabel("Relative\nreconstruction error")
     h, l = axes[0].get_legend_handles_labels()
+    axes[0].set_ylim(top=3e0)
     ncol = 4 if len(h) > 5 else len(h)
     nrows = int(np.ceil(len(h) / ncol))
     order = _row_major(len(h), ncol)
@@ -296,7 +297,7 @@ def budget_study(study, out_prefix, suptitle=None):
     fig.legend(handles=handles, loc="lower center", ncol=1,
                bbox_to_anchor=(0.5, -0.1), frameon=False, handlelength=2.6,
                columnspacing=1.6)
-    fig.suptitle('Lipschitz Budget Tuning with Validation Data Set', fontweight='bold', fontsize=25)
+    # fig.suptitle('Lipschitz Budget Tuning with Validation Data Set', fontweight='bold', fontsize=25)
     plt.tight_layout(rect=(0, 0.08, 1, 1), w_pad=4.0)
     _save(fig, out_prefix)
 

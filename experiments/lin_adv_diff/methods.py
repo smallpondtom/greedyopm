@@ -38,15 +38,15 @@ from preprocess import PreprocessedModel, Normalizer  # noqa: E402
 # ---- shared experiment configuration ----------------------------------------
 
 CFG = dict(
-    s_pool=50,            # candidate pool size for the greedy methods
-    delta=0.1,            # extrapolation margin for the certificate
-    n_grad_samples=250,   # gradient probe subsample in the greedy loop
-    n_reorth=4,           # extra Gram-Schmidt passes
-    qm_reg=1e-13,         # Greedy-QM ridge magnitude
-    cm_reg=1e-13,         # Greedy-CM ridge magnitude
-    geelen_rel=0.05,      # Geelen-QM group-lasso weight (relative)
-    geelen_gamma=1e-13,   # Geelen-QM refit Tikhonov
-    geelen_iters=400,     # Geelen-QM FISTA iterations
+    s_pool=50,             # candidate pool size for the greedy methods
+    delta=0.1,             # extrapolation margin for the certificate
+    n_grad_samples=250,    # gradient probe subsample in the greedy loop
+    n_reorth=4,            # extra Gram-Schmidt passes
+    qm_reg=np.sqrt(1e-13), # Greedy-QM ridge magnitude
+    cm_reg=np.sqrt(1e-13), # Greedy-CM ridge magnitude
+    geelen_rel=0.05,       # Geelen-QM group-lasso weight (relative)
+    geelen_gamma=1e-13,    # Geelen-QM refit Tikhonov
+    geelen_iters=400,      # Geelen-QM FISTA iterations
 )
 
 METHOD_NAMES = [

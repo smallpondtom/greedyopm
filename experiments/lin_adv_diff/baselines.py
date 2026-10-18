@@ -192,7 +192,7 @@ class GreedyQM:
         Whether to subtract the snapshot mean before the SVD.
     """
 
-    def __init__(self, r: int, s: int, *, reg: float = 1e-13,
+    def __init__(self, r: int, s: int, *, reg: float = 1e-8,
                  center: bool = True):
         if s <= r:
             raise ValueError(f"Need a candidate pool s > r; got s={s}, r={r}.")
