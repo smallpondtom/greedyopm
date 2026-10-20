@@ -142,15 +142,21 @@ def plot_diagnostics(res):
     print(f"wrote {out}")
 
 
-def animate(Re: float, fps: int = 12, dpi: int = 80):
+def animate(Re: float, fps: int = 12, dpi: int = 80, scale: float = 1.0,
+            every: int = 1):
+    """Temperature / vorticity animation.  ``scale`` enlarges the figure
+    (5.2 x 4.2 in at ``scale=1``) and ``dpi`` the rasterisation, so the pixel
+    size is ``scale * dpi * (5.2, 4.2)``; ``every`` keeps every k-th frame."""
     S, t = _load(Re)
-    fig, (a0, a1) = plt.subplots(1, 2, figsize=(5.2, 4.2))
+    S, t = S[:, ::every], t[::every]
+    fig, (a0, a1) = plt.subplots(1, 2, figsize=(5.2 * scale, 4.2 * scale))
     u, v, th = P.fields(S[:, -1])
     wmax = 0.8 * np.abs(vorticity(u, v, P.LX, P.LY)).max()
     im0 = _panel(a0, th, "inferno", 0.0, 1.0)
     im1 = _panel(a1, vorticity(u, v, P.LX, P.LY), "RdBu_r", -wmax, wmax)
-    a0.set_title(r"$\theta$"); a1.set_title(r"$\omega$")
-    title = fig.suptitle("")
+    fs = 10 * scale
+    a0.set_title(r"$\theta$", fontsize=1.2 * fs); a1.set_title(r"$\omega$", fontsize=1.2 * fs)
+    title = fig.suptitle("", fontsize=fs)
     fig.tight_layout()
 
     def update(i):
@@ -160,7 +166,8 @@ def animate(Re: float, fps: int = 12, dpi: int = 80):
         return im0, im1, title
 
     anim = FuncAnimation(fig, update, frames=S.shape[1], blit=False)
-    out = PLOTS / f"anim_Re{Re:g}.gif"
+    tag = "" if (scale == 1.0 and dpi == 80) else f"_{int(round(5.2 * scale * dpi))}px"
+    out = PLOTS / f"anim_Re{Re:g}{tag}.gif"
     anim.save(out, writer=PillowWriter(fps=fps), dpi=dpi)
     plt.close(fig)
     print(f"wrote {out}")
@@ -171,6 +178,11 @@ def main():
     ap.add_argument("--re", type=float, nargs="*", default=None)
     ap.add_argument("--gif", action="store_true")
     ap.add_argument("--no-diag", action="store_true")
+    ap.add_argument("--fps", type=int, default=12, help="GIF frame rate")
+    ap.add_argument("--dpi", type=int, default=80, help="GIF rasterisation dpi")
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="GIF figure enlargement factor (pixels scale with dpi*scale)")
+    ap.add_argument("--every", type=int, default=1, help="keep every k-th frame")
     args = ap.parse_args()
     PLOTS.mkdir(exist_ok=True)
 
@@ -181,7 +193,8 @@ def main():
         args.re = [Re for Re in wanted if Re in cached] or cached[-1:]
     for Re in args.re:
         if args.gif:
-            animate(Re)
+            animate(Re, fps=args.fps, dpi=args.dpi, scale=args.scale,
+                    every=args.every)
         else:
             plot_fields(Re)
     if not args.gif and not args.no_diag and cached:
