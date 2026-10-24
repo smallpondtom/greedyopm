@@ -35,6 +35,7 @@
 
 # Old files
 __old__/
+__graveyard__/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
