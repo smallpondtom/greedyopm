@@ -77,3 +77,20 @@ bash experiments/run_all.sh
 ```
 
 Note that we assume that the user has a working installation of [`pixi`](https://pixi.prefix.dev/latest/).
+
+## Citation
+
+If you use this code in your research, please cite the following paper:
+
+```
+@misc{
+  title = {Greedy {{Orthogonal Polynomial Manifolds}} with {{Lipschitz Control}} for {{Dimensionality Reduction}} and {{Reduced Modeling}}},
+  author = {Koike, Tomoki and Peherstorfer, Benjamin and Qian, Elizabeth},
+  year = 2026,
+  month = oct,
+  number = {arXiv:2610.33784},
+  primaryclass = {cs.LG},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2610.33784},
+}
+```
